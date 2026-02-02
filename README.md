@@ -1,7 +1,6 @@
 # Master Applied AI - Afstudeer Portfolio Template
 
 **Student:** [Je naam]  
-**Studentnummer:** [Je studentnummer]  
 **Applied AI Lab:** [Lab naam]  
 **Afstudeerbegeleider (Lab):** [Naam labbegeleider]  
 **Docentbegeleider:** [Naam docentbegeleider]  
