@@ -65,6 +65,7 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 - 💻 [Code Repository](./code/)
 
 **Wiki Navigatie:**
+[dit is een voorbeeld]
 - 📅 [Planning en Voortgang](../../wikis/Planning-en-Voortgang)
 - 🔬 [Onderzoek](../../wikis/Onderzoek)
 - 🎨 [Ontwerp](../../wikis/Ontwerp-en-Uitwerking)
