@@ -65,14 +65,14 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 - 💻 [Code Repository](./code/)
 
 **Wiki Navigatie:**
-- 📅 [Planning en Voortgang](../../wiki/Planning-en-Voortgang)
-- 🔬 [Onderzoek](../../wiki/Onderzoek)
-- 🎨 [Ontwerp](../../wiki/Ontwerp-en-Uitwerking)
-- 💻 [Ontwikkeling](../../wiki/Ontwikkeling)
-- 📊 [Evaluatie](../../wiki/Evaluatie-en-Validatie)
-- 🔄 [Feedback & Iteratie](../../wiki/Feedback-en-Iteratie)
-- 🤔 [Zelfreflectie](../../wiki/Zelfreflectie-Leeruitkomsten)
-- 🤖 [GenAI Gebruik](../../wiki/GenAI-Gebruik)
+- 📅 [Planning en Voortgang](../../wikis/Planning-en-Voortgang)
+- 🔬 [Onderzoek](../../wikis/Onderzoek)
+- 🎨 [Ontwerp](../../wikis/Ontwerp-en-Uitwerking)
+- 💻 [Ontwikkeling](../../wikis/Ontwikkeling)
+- 📊 [Evaluatie](../../wikis/Evaluatie-en-Validatie)
+- 🔄 [Feedback & Iteratie](../../wikis/Feedback-en-Iteratie)
+- 🤔 [Zelfreflectie](../../wikis/Zelfreflectie-Leeruitkomsten)
+- 🤖 [GenAI Gebruik](../../wikis/GenAI-Gebruik)
 
 ---
 
