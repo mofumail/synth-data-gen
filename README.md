@@ -1,10 +1,10 @@
 # Master Applied AI - Afstudeer Portfolio Template
 
-**Student:** [Je naam]  
-**Applied AI Lab:** [Lab naam]  
-**Afstudeerbegeleider (Lab):** [Naam labbegeleider]  
-**Docentbegeleider:** [Naam docentbegeleider]  
-**Periode:** [Semester 2, Studiejaar 2025-2026]
+**Student:** Beau Min
+**Applied AI Lab:** Centre of Market Insights
+**Afstudeerbegeleider (Lab):** Diptish Dey
+**Docentbegeleider:** Rick van Kersbergen
+**Periode:** Semester 2, Studiejaar 2025-2026
 
 ---
 
@@ -50,7 +50,7 @@ Het portfolio bestaat uit vijf hoofdcomponenten:
 
 Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial Intelligence** aan de **Hogeschool van Amsterdam**.
 
-**Copyright © 2026 [Je naam]**
+**Copyright © 2026 Beau Min**
 
 [Voeg eventueel licentie informatie toe voor je code/werk, bijvoorbeeld:]
 - Code: MIT License
@@ -77,7 +77,7 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 
 ---
 
-*Laatste update: [datum]*  
-*Portfolio versie: [versie nummer]*
+*Laatste update: 13-03-2026*  
+*Portfolio versie: 0.2*
 
 **Status:** ⚪ In ontwikkeling / ✅ 70% Go/No-Go bereikt / ✅ Definitieve versie
