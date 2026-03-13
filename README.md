@@ -39,8 +39,8 @@ Het portfolio bestaat uit vijf hoofdcomponenten:
 
 | Versie | Datum | Wijzigingen | Fase |
 |--------|-------|-------------|------|
-| 0.1 | [datum] | Initiële opzet portfolio structuur | Start Blok 3 |
-| 0.2 | [datum] | Onderzoeksplan toegevoegd | Week 6 Blok 3 |
+| 0.1 | 13-03-2026 | Initiële opzet portfolio structuur | Start Blok 3 |
+| 0.2 | 13-03-2026 | Onderzoeksplan toegevoegd | Week 6 Blok 3 |
 | 0.7 | [datum] | 70% versie (Go/No-Go moment) | Week 5 Blok 4 |
 | 1.0 | [datum] | Definitieve versie | Week 8 Blok 4 |
 
@@ -52,10 +52,6 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 
 **Copyright © 2026 Beau Min**
 
-[Voeg eventueel licentie informatie toe voor je code/werk, bijvoorbeeld:]
-- Code: MIT License
-- Dataset: [licentie indien van toepassing]
-
 ---
 
 ## 🎯 Quick Links
@@ -65,19 +61,11 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 - 💻 [Code Repository](./code/)
 
 **Wiki Navigatie:**
-[dit is een voorbeeld]
 - 📅 [Planning en Voortgang](../../wikis/Planning-en-Voortgang)
-- 🔬 [Onderzoek](../../wikis/Onderzoek)
-- 🎨 [Ontwerp](../../wikis/Ontwerp-en-Uitwerking)
-- 💻 [Ontwikkeling](../../wikis/Ontwikkeling)
-- 📊 [Evaluatie](../../wikis/Evaluatie-en-Validatie)
-- 🔄 [Feedback & Iteratie](../../wikis/Feedback-en-Iteratie)
-- 🤔 [Zelfreflectie](../../wikis/Zelfreflectie-Leeruitkomsten)
-- 🤖 [GenAI Gebruik](../../wikis/GenAI-Gebruik)
 
 ---
 
 *Laatste update: 13-03-2026*  
 *Portfolio versie: 0.2*
 
-**Status:** ⚪ In ontwikkeling / ✅ 70% Go/No-Go bereikt / ✅ Definitieve versie
+**Status:** ⚪ In ontwikkeling 
