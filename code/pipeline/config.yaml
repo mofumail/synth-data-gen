@@ -1,0 +1,42 @@
+#Dataset boundsds_start: "2022-06-23"
+ds_end:   "2022-12-08"
+
+#Train / val / test splitstrain_cutoff: "2022-11-15"
+val_cutoff:   "2022-12-01"
+
+#Sessionizationsession_timeout_min: 30        # inactivity gap (minutes) that starts a new session
+history_window:      16        # max past events used as cross-session context (covers 93.9% of users)
+
+#Vocabularyvocab_k: 630052                # top-K SKUs covering ~90% of training item events
+
+#Temporal headn_temporal_bins: 64            # log-spaced bins between temporal_min_s and session_timeout
+temporal_min_s:  1             # minimum inter-event delta (seconds)
+
+#Data loadingpage_visit_sample: 200000000   # set > 199M to load all page_visits (original ~199M)
+
+#MongoDBmongo_uri: "mongodb://localhost:27017"
+mongo_db:  "synerise"
+
+#Trainingtrain_epochs:       30
+train_batch_size:   128
+train_max_length:   50         # max events per session (including EOS)
+train_lr:           0.0003     # AdamW learning rate
+train_d_model:      64         # transformer hidden dimension
+train_n_layers:     2          # number of decoder layers
+train_n_heads:      2          # attention heads (must divide d_model)
+train_max_sessions: null       # null = use all sessions; set int for smoke tests
+
+#Evaluationeval_model: session_transformer_d64_l2   # model subdir to load for evaluate.py
+                                          # independent of training config -change this
+                                          # to switch which checkpoint gets evaluated
+
+#GRU4Rec downstream evaluatorgru4rec_embed_dim:   64
+gru4rec_hidden_dim:  128
+gru4rec_max_epochs:  30
+gru4rec_batch_size:  16
+gru4rec_vocab_k:     50000   # cap output vocab to top-K items by freq; prevents OOM with large Markov item pools
+gru4rec_lr:          0.001
+gru4rec_patience:    5
+gru4rec_lr_patience: 3
+gru4rec_val_split:   0.1
+gru4rec_lr_factor:   0.5

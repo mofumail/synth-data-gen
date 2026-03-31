@@ -1,0 +1,67 @@
+from pathlib import Path
+import yaml
+
+#PathsDATA_DIR      = Path("/home/mofu/code/thesis/code")
+PIPELINE_DIR  = Path("/home/mofu/code/thesis/pipeline")
+OUTPUT_DIR    = PIPELINE_DIR / "output"
+CLEAN_PARQUET = OUTPUT_DIR / "events_clean.parquet"
+TEST_PARQUET  = OUTPUT_DIR / "events_test.parquet"
+MODEL_DIR     = OUTPUT_DIR / "models"
+SYNTH_DIR     = OUTPUT_DIR / "synthetic"
+
+#Load config.yaml_cfg = yaml.safe_load((PIPELINE_DIR / "config.yaml").read_text())
+
+#Dataset boundsDS_START = _cfg["ds_start"]
+DS_END   = _cfg["ds_end"]
+
+#Train / val / test splitsTRAIN_CUTOFF = _cfg["train_cutoff"]
+VAL_CUTOFF   = _cfg["val_cutoff"]
+
+#SessionizationSESSION_TIMEOUT_MIN = _cfg["session_timeout_min"]
+TEMPORAL_MAX_S      = SESSION_TIMEOUT_MIN * 60   # derived: max intra-session delta (seconds)
+HISTORY_WINDOW      = _cfg["history_window"]
+
+#VocabularyVOCAB_K = _cfg["vocab_k"]
+
+#Temporal headN_TEMPORAL_BINS = _cfg["n_temporal_bins"]
+TEMPORAL_MIN_S  = _cfg["temporal_min_s"]
+
+#Data loadingPAGE_VISIT_SAMPLE = _cfg["page_visit_sample"]
+
+#Event typesITEM_BEARING_EVENTS = {"add_to_cart", "remove_from_cart", "product_buy"}
+ALL_EVENT_TYPES     = {
+    "page_visit", "search_query",
+    "add_to_cart", "remove_from_cart", "product_buy",
+}
+
+#MongoDB (locally run through docker)MONGO_URI = _cfg["mongo_uri"]
+MONGO_DB  = _cfg["mongo_db"]
+
+#TrainingTRAIN_EPOCHS       = _cfg["train_epochs"]
+TRAIN_BATCH_SIZE   = _cfg["train_batch_size"]
+TRAIN_MAX_LENGTH   = _cfg["train_max_length"]
+TRAIN_LR           = _cfg["train_lr"]
+TRAIN_D_MODEL      = _cfg["train_d_model"]
+TRAIN_N_LAYERS     = _cfg["train_n_layers"]
+TRAIN_N_HEADS      = _cfg["train_n_heads"]
+TRAIN_MAX_SESSIONS = _cfg["train_max_sessions"]   # None = full dataset
+
+# Derived: unique model name used for checkpoint and config snapshot filenames.
+# Changing d_model or n_layers in config.yaml automatically routes to a different
+# file so ablation variants never overwrite each other.
+MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}"
+MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/  -one folder per variant
+
+#Evaluation model (independent of training config)EVAL_MODEL_NAME  = _cfg.get("eval_model", MODEL_NAME)   # defaults to current train model
+EVAL_MODEL_SUBDIR = MODEL_DIR / EVAL_MODEL_NAME
+
+#GRU4Rec downstream evaluatorGRU4REC_VOCAB_K     = _cfg.get("gru4rec_vocab_k", 50000)
+GRU4REC_EMBED_DIM   = _cfg["gru4rec_embed_dim"]
+GRU4REC_HIDDEN_DIM  = _cfg["gru4rec_hidden_dim"]
+GRU4REC_MAX_EPOCHS  = _cfg["gru4rec_max_epochs"]
+GRU4REC_BATCH_SIZE  = _cfg["gru4rec_batch_size"]
+GRU4REC_LR          = _cfg["gru4rec_lr"]
+GRU4REC_PATIENCE    = _cfg["gru4rec_patience"]
+GRU4REC_LR_PATIENCE = _cfg["gru4rec_lr_patience"]
+GRU4REC_VAL_SPLIT   = _cfg["gru4rec_val_split"]
+GRU4REC_LR_FACTOR   = _cfg["gru4rec_lr_factor"]
