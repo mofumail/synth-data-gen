@@ -1,6 +1,7 @@
 from pathlib import Path
 import yaml
-
+# Side note; these first 2 paths are specific for my own folder locations, you'd want to change these before 
+# running anything
 #Paths
 DATA_DIR      = Path("/home/mofu/code/thesis/code")
 PIPELINE_DIR  = Path("/home/mofu/code/thesis/pipeline")
