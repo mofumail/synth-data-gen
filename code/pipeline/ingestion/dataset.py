@@ -327,8 +327,7 @@ class InteractionGenerator:
     Convenience wrapper: constructs SessionDataset + torch DataLoader.
     Used by the training script.
 
-    Attributes
-    ----------
+    Attributes:
     dataset : SessionDataset
     loader  : torch.utils.data.DataLoader
     """

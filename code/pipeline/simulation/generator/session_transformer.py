@@ -234,18 +234,15 @@ class SessionTransformer(nn.Module):
     """
     Full autoregressive session generator.
 
-    Training
-    --------
+    Training:
     loss = CE(action_logits, tgt_actions)
          + CE(item_logits[item-bearing positions], tgt_items[item-bearing])
          + CE(temporal_logits, tgt_deltas)
 
-    Inference
-    ---------
+    Inference:
     Use SessionTransformer.infer(client_id, sku, start_dt, history).
 
-    Parameters
-    ----------
+    Args:
     vocab_size        : unique SKUs -VOCAB_K = 630,052
     n_actions         : 5 event types + EOS = 6
     d_model           : transformer hidden dimension (default 256)
@@ -312,8 +309,7 @@ class SessionTransformer(nn.Module):
         Input tokens  : t = 0 .. T-2
         Target tokens : t = 1 .. T-1   (shifted by 1)
 
-        Returns
-        -------
+        Returns:
         action_logits   : [B, T-1, n_actions]
         item_logits     : [M, vocab_size]   if item_mask provided (M = item_mask.sum())
                           [B, T-1, vocab_size]  otherwise (may OOM for large vocabs)
@@ -380,8 +376,7 @@ class SessionTransformer(nn.Module):
         """
         Generate one session autoregressively.
 
-        Parameters
-        ----------
+        Args:
         client_id   : user id (from SimpleIdentitySampler)
         sku         : seed item (0-indexed, from SimpleIdentitySampler)
         start_dt    : session start time (datetime or pd.Timestamp)
@@ -389,8 +384,7 @@ class SessionTransformer(nn.Module):
         max_steps   : max events before forced stop
         temperature : sampling temperature
 
-        Returns
-        -------
+        Returns:
         List of event dicts: {client_id, event_type, sku, timestamp}
         """
         self.eval()
@@ -503,14 +497,12 @@ class SessionTransformer(nn.Module):
         All sessions share a batch dimension and advance one token per step.
         Done sessions (EOS emitted) are masked out and their tokens are ignored.
 
-        Parameters are
-        ----------
+        Args:
         batch_inputs : list of (client_id, sku, start_dt, history) tuples
         max_steps    : max events per session before forced stop
         temperature  : sampling temperature
 
-        Returns
-        -------
+        Returns:
         List[List[dict]] -one event-dict list per input
         """
         self.eval()
