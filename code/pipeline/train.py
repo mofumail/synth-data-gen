@@ -31,7 +31,7 @@ from config import (
     MODEL_DIR, MODEL_NAME, MODEL_SUBDIR, VOCAB_K, N_TEMPORAL_BINS, HISTORY_WINDOW,
     TRAIN_EPOCHS, TRAIN_BATCH_SIZE, TRAIN_MAX_LENGTH,
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
-    TRAIN_MAX_SESSIONS,
+    TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
 )
 from ingestion.dataset import InteractionGenerator
 from simulation.generator.session_transformer import (
@@ -77,13 +77,18 @@ def train():
         },
     )
 
+    # Epoch-level metrics use epoch as x-axis; step-level metrics use global_step
+    wandb.define_metric("epoch")
+    wandb.define_metric("train/epoch_*", step_metric="epoch")
+    wandb.define_metric("val/*",         step_metric="epoch")
+
     # Dataset
     print(f"\nLoading dataset (split=train, max_sessions={TRAIN_MAX_SESSIONS}) ...")
     gen = InteractionGenerator(
         split="train",
         batch_size=TRAIN_BATCH_SIZE,
         max_length=TRAIN_MAX_LENGTH,
-        num_workers=0,            # safer for large parquet + multiprocessing
+        num_workers=TRAIN_NUM_WORKERS,
         max_sessions=TRAIN_MAX_SESSIONS,
     )
     print(f"  {len(gen.dataset):,} training sessions | {len(gen):,} batches/epoch")
@@ -93,7 +98,7 @@ def train():
         split="val",
         batch_size=TRAIN_BATCH_SIZE,
         max_length=TRAIN_MAX_LENGTH,
-        num_workers=0,
+        num_workers=TRAIN_NUM_WORKERS,
         max_sessions=None,        # always use full val set
     )
     print(f"  {len(val_gen.dataset):,} val sessions | {len(val_gen):,} batches")
@@ -108,6 +113,7 @@ def train():
         window_H=HISTORY_WINDOW,
         valid_transitions={},     # mask not used during training
     ).to(device)
+    model = torch.compile(model)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {n_params:,}")
