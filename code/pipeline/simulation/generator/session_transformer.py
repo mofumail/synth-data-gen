@@ -335,12 +335,11 @@ class SessionTransformer(nn.Module):
             + self.pos_emb(pos)
         )  # [B, T, d_model]
 
-        memory   = self._encode_history(history, B, device)                         # [B, >=1, d_model]
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device) # [T, T]
+        memory = self._encode_history(history, B, device)  # [B, >=1, d_model]
 
         h = self.decoder(
             x, memory,
-            tgt_mask=tgt_mask,
+            tgt_is_causal=True,
             tgt_key_padding_mask=tgt_key_padding_mask,
         )  # [B, T, d_model]
 
@@ -610,6 +609,7 @@ class SessionTransformer(nn.Module):
                 })
 
             # Grow sequence tensors (all sessions, incl. done -keeps shape uniform)
+            # poor implementation that needs to get fixed as well, 
             cur_e = torch.cat([cur_e, a_idxs.unsqueeze(1)], dim=1)
             cur_i = torch.cat([cur_i, i_idxs.unsqueeze(1)], dim=1)
             cur_d = torch.cat([cur_d, bin_idxs.unsqueeze(1)], dim=1)
