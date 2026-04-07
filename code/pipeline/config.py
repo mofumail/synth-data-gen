@@ -3,16 +3,16 @@ import yaml
 # Side note; these first 2 paths are specific for my own folder locations, you'd want to change these before 
 # running anything
 #Paths
-DATA_DIR      = Path("/home/mofu/code/thesis/code")
-PIPELINE_DIR  = Path("/home/mofu/code/thesis/pipeline")
+DATA_DIR      = Path(__file__).parent.parent / "DATA"
+PIPELINE_DIR  = Path(__file__).parent
 OUTPUT_DIR    = PIPELINE_DIR / "output"
 CLEAN_PARQUET = OUTPUT_DIR / "events_clean.parquet"
 TEST_PARQUET  = OUTPUT_DIR / "events_test.parquet"
 MODEL_DIR     = OUTPUT_DIR / "models"
 SYNTH_DIR     = OUTPUT_DIR / "synthetic"
 
-#Load 
-config.yaml_cfg = yaml.safe_load((PIPELINE_DIR / "config.yaml").read_text())
+# Load config.yaml
+_cfg = yaml.safe_load((PIPELINE_DIR / "config.yaml").read_text())
 
 #Dataset bounds
 DS_START = _cfg["ds_start"]
@@ -57,11 +57,12 @@ TRAIN_D_MODEL      = _cfg["train_d_model"]
 TRAIN_N_LAYERS     = _cfg["train_n_layers"]
 TRAIN_N_HEADS      = _cfg["train_n_heads"]
 TRAIN_MAX_SESSIONS = _cfg["train_max_sessions"]   # None = full dataset
+TRAIN_NUM_WORKERS  = _cfg.get("train_num_workers", 4)
 
 # Derived: unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}"
+MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/  -one folder per variant
 
 #Evaluation model (independent of training config)
