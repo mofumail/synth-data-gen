@@ -167,6 +167,17 @@ def main():
     print(f"p99             : {gap_hours.quantile(0.99):.1f}h")
     print(f"max             : {gap_hours.max():.1f}h")
 
+    # Drop sessions that contain only page_visit events (no SKU signal)
+    has_item_event = (
+        df.filter(pl.col("event_type") != "page_visit")
+        .select("session_id")
+        .unique()
+    )
+    n_before = df["session_id"].n_unique()
+    df = df.join(has_item_event, on="session_id", how="inner")
+    n_after = df["session_id"].n_unique()
+    print(f"\nFiltered page-visit-only sessions: {n_before:,} -> {n_after:,} ({n_before - n_after:,} dropped)")
+
     # Split on session start: train+val -> clean, test -> locked separate file
     val_cut = pd.Timestamp(VAL_CUTOFF).to_pydatetime()
     sess_starts = (

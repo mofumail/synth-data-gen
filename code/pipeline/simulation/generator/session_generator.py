@@ -49,7 +49,7 @@ class SessionGenerator:
         valid_transitions: dict = None,
         identity_sampler_path: Optional[str] = None,
         device: str = "cpu",
-        batch_size: int = 256,
+        batch_size: int = 512,
     ):
         self.model_path            = str(model_path)
         self.validity_layer        = validity_layer
@@ -72,6 +72,8 @@ class SessionGenerator:
             valid_transitions=self.valid_transitions,
             device=self.device,
         )
+        actual_device = next(self._model.parameters()).device
+        print(f"  SessionTransformer device: {actual_device}")
         # Attach sku2idx / idx2sku for correct item encoding/decoding in infer()
         try:
             import joblib
@@ -178,13 +180,27 @@ class SessionGenerator:
         start_base = pd.Timestamp(DS_START)
         window_s   = 30 * 24 * 3600
 
-        # Build all (client_id, sku, start_dt, history) inputs up front
+        import sys
+
+        # Sample identities — chunked so tqdm shows progress (CTGAN can be slow at 1M+)
+        CTGAN_CHUNK = 50_000
+        if self._sampler is not None:
+            identities: list = []
+            n_chunks = (n_sessions + CTGAN_CHUNK - 1) // CTGAN_CHUNK
+            for c_start in tqdm(range(0, n_sessions, CTGAN_CHUNK), total=n_chunks,
+                                desc="  CTGAN sampling", unit="chunk", file=sys.stdout):
+                n_chunk = min(CTGAN_CHUNK, n_sessions - c_start)
+                identities.extend(self._sampler.generate_identities(n_chunk))
+        else:
+            identities = None
+
+        # Build batch inputs
         batch_inputs: List[tuple] = []
-        for _ in range(n_sessions):
-            if self._sampler is not None:
-                identity = self._sampler.generate_identity()
-                cid      = identity["client_id"]
-                item     = identity["sku"]
+        for idx in tqdm(range(n_sessions), desc="  Building inputs", unit="sess",
+                        miniters=n_sessions // 100, file=sys.stdout):
+            if identities is not None:
+                cid  = identities[idx]["client_id"]
+                item = identities[idx]["sku"]
             else:
                 cid  = int(rng_np.integers(1, 10_000_000))
                 item = int(rng_np.integers(0, VOCAB_K))
@@ -198,7 +214,8 @@ class SessionGenerator:
         # Generate in batches - all sessions in a batch run in parallel on GPU
         sessions: List[List[dict]] = []
         n_batches = (n_sessions + self.batch_size - 1) // self.batch_size
-        for start in tqdm(range(0, n_sessions, self.batch_size), total=n_batches, desc="  Transformer gen", unit="batch", leave=False, file=__import__("sys").stdout):
+        for start in tqdm(range(0, n_sessions, self.batch_size), total=n_batches,
+                          desc="  Transformer gen", unit="batch", leave=True, file=sys.stdout):
             chunk   = batch_inputs[start : start + self.batch_size]
             results = self._model.infer_batch(chunk)
             if apply_constraints:

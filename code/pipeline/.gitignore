@@ -1,0 +1,26 @@
+# Generated outputs - data, models, reports
+output/
+
+# Synthetic data
+synth_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+
+# Virtual environment
+.venv/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+.claude/
+.idea/
+.venv/
+wandb/
+uv.lock
+output/

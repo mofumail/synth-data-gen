@@ -120,3 +120,12 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+# Raw dataset (large parquet files, not committed)
+code/DATA/
+
+# Pipeline outputs (models, reports, synthetic data)
+code/pipeline/output/
+
+# Synerise
+code/recsys2025/

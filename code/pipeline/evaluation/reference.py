@@ -11,6 +11,7 @@ Also provides RealData (train/val/test session container) and RealDataLoader.
 from __future__ import annotations
 
 import json
+import os
 import random
 from collections import defaultdict
 from dataclasses import dataclass, asdict, field
@@ -24,7 +25,27 @@ import polars as pl
 
 from config import (
     CLEAN_PARQUET, TEST_PARQUET, ITEM_BEARING_EVENTS, TRAIN_CUTOFF, VAL_CUTOFF, VOCAB_K,
+    OUTPUT_DIR,
 )
+
+
+# Module-level worker for multiprocessing (must be top-level, not nested, to be picklable)
+def _build_sessions_chunk(args: tuple) -> List[List[dict]]:
+    # ts values are already datetime.datetime from Polars to_list() — no pd.Timestamp() needed.
+    # datetime arithmetic (b - a).total_seconds() works identically.
+    cid_ints, ev_types, skus_col, tss_col = args
+    out = []
+    for cid_int, evts, skus, tss in zip(cid_ints, ev_types, skus_col, tss_col):
+        out.append([
+            {
+                "client_id":  cid_int,
+                "event_type": et,
+                "sku":        int(sk) if sk is not None else None,
+                "timestamp":  ts,
+            }
+            for et, sk, ts in zip(evts, skus, tss)
+        ])
+    return out
 
 
 # Data containers
@@ -115,68 +136,101 @@ class RealDataLoader:
         """
         Load train and val splits from events_clean.parquet.
 
-        The test split (events_test.parquet) is LOCKED and only loaded when
-        include_test=True is explicitly passed. Do not set this flag until all
-        model and architecture decisions are final.
-        """
-        # Train + val come from events_clean.parquet (no test data)
-        path = str(parquet_path or CLEAN_PARQUET)
-        df = pl.read_parquet(
-            path,
-            columns=["client_id", "timestamp", "event_type", "session_id", "sku"],
-        ).sort(["session_id", "timestamp"])
+        The slow steps (full parquet read + Polars group_by agg) are cached as
+        compact aggregated parquets (~100MB) keyed on parquet mtime + parameters.
+        On cache hit, only the parallel Python dict construction runs (~1-2 min).
+        On cache miss the full build runs and writes the cache (~10-15 min, once only).
 
+        Avoids pickling the full List[List[dict]] (50GB+ RAM → OOM).
+
+        The test split is LOCKED; only loaded when include_test=True.
+        """
+        path      = str(parquet_path or CLEAN_PARQUET)
+        mtime     = int(os.path.getmtime(path) * 1000)
+        cache_tag = (
+            f"{mtime}_ml{min_length}"
+            f"_tr{max_train_sessions or 'all'}"
+            f"_vl{max_val_sessions or 'all'}"
+            f"_test{int(include_test)}"
+        )
+        cache_dir = OUTPUT_DIR / f"real_sessions_agg_{cache_tag}"
+
+        def agg_to_sessions(agg_df: "pl.DataFrame") -> List[List[dict]]:
+            """Convert aggregated Polars DataFrame to List[List[dict]].
+            Single-threaded — multiprocessing was removed because pickling 5M dicts
+            through IPC pipes doubled peak RAM and caused OOM. Without pd.Timestamp()
+            the plain Python loop is fast enough (~15-20s for 5M sessions).
+            """
+            cids     = agg_df["client_id"].to_list()
+            ev_types = agg_df["event_types"].to_list()
+            skus_col = agg_df["skus"].to_list()
+            tss_col  = agg_df["timestamps"].to_list()
+            return _build_sessions_chunk((
+                [int(c) for c in cids], ev_types, skus_col, tss_col
+            ))
+
+        if cache_dir.exists():
+            print(f"  Loading aggregated session cache ({cache_dir.name}) ...")
+            train_agg = pl.read_parquet(cache_dir / "train.parquet")
+            val_agg   = pl.read_parquet(cache_dir / "val.parquet")
+            print("  Building train sessions ...")
+            train = agg_to_sessions(train_agg)
+            print(f"    {len(train):,} train sessions")
+            print("  Building val sessions ...")
+            val = agg_to_sessions(val_agg)
+            print(f"    {len(val):,} val sessions")
+            test = []
+            if include_test and (cache_dir / "test.parquet").exists():
+                test_agg = pl.read_parquet(cache_dir / "test.parquet")
+                print("  Building test sessions ...")
+                test = agg_to_sessions(test_agg)
+                print(f"    {len(test):,} test sessions")
+            return RealData(train_split=train, val_split=val, test_split=test)
+
+        # --- Full build from raw parquet ---
+        # Single-pass lazy query: no global sort, no session_starts join.
+        # Sort within each group via sort_by() — O(k log k) per session (~7 events)
+        # vs global O(N log N) on 199M rows. Drop maintain_order (hash groupby is faster).
         train_cut = pd.Timestamp(TRAIN_CUTOFF)
         val_cut   = pd.Timestamp(VAL_CUTOFF)
 
-        # Session-start timestamps (one per session) - stays in Rust
-        session_starts = (
-            df.group_by("session_id")
-            .agg(pl.col("timestamp").min().alias("session_start"))
-        )
-        df = df.join(session_starts, on="session_id")
-
-        def build_sessions(source_df, filter_expr, max_n: Optional[int]) -> List[List[dict]]:
-            sessions_df = (
-                source_df.filter(filter_expr)
-                .group_by("session_id", maintain_order=True)
-                .agg(
-                    pl.struct(["client_id", "event_type", "sku", "timestamp"])
-                    .alias("events"),
-                    pl.len().alias("n"),
-                )
-                .filter(pl.col("n") >= min_length)
+        print("  Aggregating sessions from parquet (single pass) ...")
+        full_agg = (
+            pl.scan_parquet(path)
+            .select(["client_id", "timestamp", "event_type", "session_id", "sku"])
+            .group_by("session_id")
+            .agg(
+                pl.col("client_id").first(),
+                pl.col("event_type").sort_by("timestamp").alias("event_types"),
+                pl.col("sku").sort_by("timestamp").alias("skus"),
+                pl.col("timestamp").sort().alias("timestamps"),
+                pl.col("timestamp").min().alias("session_start"),
+                pl.len().alias("n"),
             )
-            if max_n is not None:
-                sessions_df = sessions_df.sample(n=min(max_n, len(sessions_df)), seed=42)
+            .filter(pl.col("n") >= min_length)
+            .collect()
+        )
 
-            out = []
-            for row in sessions_df["events"].to_list():
-                session = []
-                for e in row:
-                    sku = e["sku"]
-                    session.append({
-                        "client_id":  int(e["client_id"]),
-                        "event_type": e["event_type"],
-                        "sku":        int(sku) if sku is not None else None,
-                        "timestamp":  pd.Timestamp(e["timestamp"]),
-                    })
-                out.append(session)
-            return out
+        def make_agg(filter_expr, max_n: Optional[int]) -> "pl.DataFrame":
+            agg_df = full_agg.filter(filter_expr)
+            if max_n is not None:
+                agg_df = agg_df.sample(n=min(max_n, len(agg_df)), seed=42)
+            return agg_df.drop("session_start", "n")
 
         print("  Building train sessions ...")
-        train = build_sessions(df, pl.col("session_start") < train_cut, max_train_sessions)
+        train_agg = make_agg(pl.col("session_start") < train_cut, max_train_sessions)
+        train = agg_to_sessions(train_agg)
         print(f"    {len(train):,} train sessions")
 
         print("  Building val sessions ...")
-        val = build_sessions(
-            df,
+        val_agg = make_agg(
             (pl.col("session_start") >= train_cut) & (pl.col("session_start") < val_cut),
             max_val_sessions,
         )
+        val = agg_to_sessions(val_agg)
         print(f"    {len(val):,} val sessions")
 
-        # Test split - only loaded when explicitly requested
+        test, test_agg = [], None
         if include_test:
             print("  Building test sessions (LOCKED - final evaluation only) ...")
             test_path = str(test_parquet_path or TEST_PARQUET)
@@ -188,11 +242,19 @@ class RealDataLoader:
                 df_test.group_by("session_id").agg(pl.col("timestamp").min().alias("session_start")),
                 on="session_id",
             )
-            test = build_sessions(df_test, pl.lit(True), max_test_sessions)
+            test_agg = make_agg(df_test, pl.lit(True), max_test_sessions)
+            test = agg_to_sessions(test_agg)
             print(f"    {len(test):,} test sessions")
         else:
             print("  Test split not loaded (pass include_test=True for final evaluation only).")
-            test = []
+
+        # Save aggregated parquets (compact, no OOM risk)
+        print(f"  Saving aggregated session cache -> {cache_dir.name}/ ...")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        train_agg.write_parquet(cache_dir / "train.parquet")
+        val_agg.write_parquet(cache_dir / "val.parquet")
+        if test_agg is not None:
+            test_agg.write_parquet(cache_dir / "test.parquet")
 
         return RealData(train_split=train, val_split=val, test_split=test)
 

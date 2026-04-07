@@ -1,0 +1,49 @@
+flowchart TD
+    subgraph INPUT["Input  ·  one token per event t"]
+        direction LR
+        AE["event_emb\naction_t → ℝᵈ"]
+        CE["item_emb\nc₁_t  c₂_t  c₃_t\n3 × Embedding 128×d\nsummed → ℝᵈ"]
+        DE["delta_emb\nbin_t → ℝᵈ"]
+        PO["pos_emb\nt → ℝᵈ"]
+        XS["⊕\nx_t ∈ ℝᵈ"]
+        AE & CE & DE & PO --> XS
+    end
+
+    subgraph MEMORY["Cross-Session History  (unchanged)"]
+        HST["prior session events\n→ CrossSessionHistory\n→ memory  ∈ ℝᴮˣ¹ˣᵈ"]
+    end
+
+    subgraph DECODER["Causal Transformer Decoder  (unchanged)"]
+        DEC["TransformerDecoder\nn_layers · d_model · n_heads\nself-attn  causal\ncross-attn  ← memory"]
+    end
+
+    XS --> DECODER
+    MEMORY --> DECODER
+
+    HT["h_t  ∈ ℝᵈ\nhidden state at each output position"]
+    DECODER --> HT
+
+    subgraph HEADS["Prediction Heads  ·  teacher-forced  ·  single forward pass"]
+        direction TB
+
+        AH["ActionHead\nLinear d → 6\nCE loss  ·  all positions"]
+
+        subgraph ITEM["Item Head  ·  3-step cascade"]
+            direction TB
+            IH1["ItemHead₁\nLinear  d → 128\npredict c₁\nCE loss"]
+            IH2["ItemHead₂\nLinear  2d → 128\npredict c₂  given  h_t ⊕ emb(ĉ₁)\nCE loss"]
+            IH3["ItemHead₃\nLinear  3d → 128\npredict c₃  given  h_t ⊕ emb(ĉ₁) ⊕ emb(ĉ₂)\nCE loss"]
+            IH1 -->|"emb(ĉ₁) appended"| IH2
+            IH2 -->|"emb(ĉ₂) appended"| IH3
+        end
+
+        TH["TemporalHead  (unchanged)\nLinear d → 64  bins\nCE loss  ·  all positions"]
+
+        AH
+        ITEM
+        TH
+    end
+
+    HT --> AH
+    HT --> ITEM
+    HT --> TH

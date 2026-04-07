@@ -56,6 +56,10 @@ def seconds_to_bin(secs: float) -> int:
     return min(int(np.searchsorted(BIN_EDGES[1:], secs)), N_TEMPORAL_BINS - 1)
 
 
+# Precomputed lookup: avoids np.sqrt on every generated event
+BIN_SECONDS_LUT: List[float] = [bin_to_seconds(i) for i in range(N_TEMPORAL_BINS)]
+
+
 def bin_to_seconds(bin_idx: int) -> float:
     lo = BIN_EDGES[bin_idx]
     hi = BIN_EDGES[min(bin_idx + 1, N_TEMPORAL_BINS)]
@@ -481,7 +485,7 @@ class SessionTransformer(nn.Module):
 
         return events_out
 
-    # Batched autoregressive inference, dont ask me how this works, I don't know either
+    # Batched autoregressive inference with KV cache
 
     @torch.no_grad()
     def infer_batch(
@@ -491,10 +495,15 @@ class SessionTransformer(nn.Module):
         temperature: float = 1.0,
     ) -> List[List[dict]]:
         """
-        Generate B sessions in parallel.
+        KV-cached batch inference.
 
-        All sessions share a batch dimension and advance one token per step.
-        Done sessions (EOS emitted) are masked out and their tokens are ignored.
+        Each step processes only the single new token [B, 1, d_model] through the
+        decoder, using per-layer caches for all past positions as K/V in self-attention.
+        This reduces per-step attention from O(T^2) to O(T) and eliminates the
+        growing-tensor torch.cat from the hot path.
+
+        KV cache layout: kv_caches[l] = layer-l inputs for positions 0..t-1, [B, t, d].
+        At step t the new token is the query; cat([cache, x_new]) is key/value.
 
         Args:
         batch_inputs : list of (client_id, sku, start_dt, history) tuples
@@ -502,122 +511,179 @@ class SessionTransformer(nn.Module):
         temperature  : sampling temperature
 
         Returns:
-        List[List[dict]] -one event-dict list per input
+        List[List[dict]] - one event-dict list per input
         """
         self.eval()
-        device  = next(self.parameters()).device
-        B       = len(batch_inputs)
-        sku2idx = getattr(self, "_sku2idx", {})
-        idx2sku = getattr(self, "_idx2sku", {})
+        device   = next(self.parameters()).device
+        B        = len(batch_inputs)
+        sku2idx  = getattr(self, "_sku2idx", {})
+        idx2sku  = getattr(self, "_idx2sku", {})
+        n_layers = len(self.decoder.layers)
+        use_cuda = device.type == "cuda"
 
-        # Per-session history ->memory [B, 1, d_model] This fucking sucks
-        memories = []
-        for _, _, _, history in batch_inputs:
-            if history:
-                hist_emb = self._history_dicts_to_emb(history, device)  # [1, H, d_model]
-                mem      = self.history.encode(hist_emb)                 # [1, 1, d_model]
-            else:
-                mem = torch.zeros(1, 1, self.d_model, device=device)
-            memories.append(mem)
-        memory = torch.cat(memories, dim=0)  # [B, 1, d_model]
+        # bf16 autocast: halves memory bandwidth, enables tensor cores on 4070 Ti.
+        # multinomial/indexing stay in fp32 automatically via autocast rules.
+        autocast_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if use_cuda else torch.autocast("cpu", enabled=False)
 
-        # Seed tokens
-        seed_items = [
-            sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
-            for _, sku, _, _ in batch_inputs
-        ]
-        cur_e = torch.tensor([[ACTION2IDX["page_visit"]] for _ in range(B)],
-                             dtype=torch.long, device=device)   # [B, 1]
-        cur_i = torch.tensor([[s] for s in seed_items],
-                             dtype=torch.long, device=device)   # [B, 1]
-        cur_d = torch.zeros(B, 1, dtype=torch.long, device=device)  # [B, 1]
+        with autocast_ctx:
+            # Cross-attention memory [B, 1, d_model]
+            memories = []
+            for _, _, _, history in batch_inputs:
+                if history:
+                    hist_emb = self._history_dicts_to_emb(history, device)
+                    mem      = self.history.encode(hist_emb)
+                else:
+                    mem = torch.zeros(1, 1, self.d_model, device=device)
+                memories.append(mem)
+            memory = torch.cat(memories, dim=0)  # [B, 1, d_model]
+
+            # Seed token at position 0
+            seed_items = [
+                sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
+                for _, sku, _, _ in batch_inputs
+            ]
+            e0 = torch.tensor([[ACTION2IDX["page_visit"]]] * B, dtype=torch.long, device=device)
+            i0 = torch.tensor([[s] for s in seed_items],        dtype=torch.long, device=device)
+            d0 = torch.zeros(B, 1, dtype=torch.long, device=device)
+            p0 = torch.zeros(1, 1, dtype=torch.long, device=device)
+            x  = self.event_emb(e0) + self.item_emb(i0) + self.delta_emb(d0) + self.pos_emb(p0)
+
+                # Pre-allocate KV buffers [B, max_steps+1, d] — no torch.cat in the hot loop
+            kv_dtype = torch.bfloat16 if use_cuda else torch.float32
+            kv_buf: List[Tensor] = [
+                torch.zeros(B, max_steps + 1, self.d_model, device=device, dtype=kv_dtype)
+                for _ in range(n_layers)
+            ]
+            x = self._run_decoder_prealloc(x, kv_buf, t=0, memory=memory)
 
         done             = torch.zeros(B, dtype=torch.bool, device=device)
         last_action_idxs = torch.full((B,), -1, dtype=torch.long, device=device)
-        # Ok
-        events_out  = [[] for _ in range(B)]
-        current_dts = []
-        for _, _, start_dt, _ in batch_inputs:
-            if not isinstance(start_dt, pd.Timestamp):
-                start_dt = pd.Timestamp(start_dt)
-            current_dts.append(start_dt)
+        events_out       = [[] for _ in range(B)]
+        current_dts      = [
+            pd.Timestamp(sdt) if not isinstance(sdt, pd.Timestamp) else sdt
+            for _, _, sdt, _ in batch_inputs
+        ]
+        client_ids = [bi[0] for bi in batch_inputs]
 
-        for _ in range(max_steps):
+        for step in range(max_steps):
             if done.all():
                 break
 
-            T   = cur_e.size(1)
-            pos = torch.arange(T, device=device).unsqueeze(0)   # [1, T] broadcast
-            x   = (
-                self.event_emb(cur_e)
-                + self.item_emb(cur_i)
-                + self.delta_emb(cur_d)
-                + self.pos_emb(pos)
-            )  # [B, T, d_model]
+            with autocast_ctx:
+                h_t = x[:, 0, :]   # [B, d_model]
 
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device)
-            h   = self.decoder(x, memory, tgt_mask=tgt_mask)  # [B, T, d_model]
-            h_t = h[:, -1, :]                                  # [B, d_model]
+                # Action
+                a_logits = self.action_head.fc(h_t) / temperature
+                a_logits = self.action_head.constraint_mask.apply_batch(a_logits, last_action_idxs)
+                a_probs  = F.softmax(a_logits.float(), dim=-1)
+                a_idxs   = torch.multinomial(a_probs, 1).squeeze(1)   # [B]
 
-            #  Action
-            a_logits = self.action_head.fc(h_t) / temperature  # [B, N_ACTIONS]
-            a_logits = self.action_head.constraint_mask.apply_batch(a_logits, last_action_idxs)
-            a_probs  = F.softmax(a_logits, dim=-1)
-            a_idxs   = torch.multinomial(a_probs, 1).squeeze(1)  # [B]
+                newly_done = (a_idxs == EOS_IDX) | done
 
-            newly_done = (a_idxs == EOS_IDX) | done
+                # Item
+                is_item = torch.zeros(B, dtype=torch.bool, device=device)
+                for idx in ITEM_BEARING_IDX:
+                    is_item |= (a_idxs == idx)
+                is_item &= ~done
 
-            # Item (item-bearing, non-done sessions only)
-            is_item = torch.zeros(B, dtype=torch.bool, device=device)
-            for idx in ITEM_BEARING_IDX:
-                is_item |= (a_idxs == idx)
-            is_item &= ~done
+                i_idxs = torch.zeros(B, dtype=torch.long, device=device)
+                if is_item.any():
+                    h_item   = h_t[is_item]
+                    a_item   = a_idxs[is_item]
+                    i_logits = self.item_head(h_item, a_item) / temperature
+                    k        = min(self.item_head.top_k, self.vocab_size)
+                    topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)
+                    i_probs  = F.softmax(topk_v.float(), dim=-1)
+                    chosen   = torch.multinomial(i_probs, 1).squeeze(1)
+                    i_idxs[is_item] = topk_ids.gather(1, chosen.unsqueeze(1)).squeeze(1)
 
-            i_idxs = torch.zeros(B, dtype=torch.long, device=device)
-            if is_item.any():
-                h_item   = h_t[is_item]       # [M, d_model]
-                a_item   = a_idxs[is_item]    # [M]
-                i_logits = self.item_head(h_item, a_item) / temperature  # [M, vocab_size]
-                k        = min(self.item_head.top_k, self.vocab_size)
-                topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)      # [M, k]
-                i_probs  = F.softmax(topk_v, dim=-1)
-                chosen   = torch.multinomial(i_probs, 1).squeeze(1)     # [M]
-                i_idxs[is_item] = topk_ids.gather(1, chosen.unsqueeze(1)).squeeze(1)
-            # This is bad but works for now
-            # Temporal
-            i_emb_t  = self.item_emb(i_idxs)  # [B, d_model]
-            d_logits = self.temporal_head(h_t, a_idxs, i_emb_t) / temperature
-            d_probs  = F.softmax(d_logits, dim=-1)
-            bin_idxs = torch.multinomial(d_probs, 1).squeeze(1)  # [B]
+                # Temporal
+                i_emb_t  = self.item_emb(i_idxs)
+                d_logits = self.temporal_head(h_t, a_idxs, i_emb_t) / temperature
+                d_probs  = F.softmax(d_logits.float(), dim=-1)
+                bin_idxs = torch.multinomial(d_probs, 1).squeeze(1)
 
-            # Collect outputs
+            # Bulk CPU transfer — one sync per step instead of 3×B individual .item() calls
+            a_list    = a_idxs.cpu().tolist()
+            i_list    = i_idxs.cpu().tolist()
+            bin_list  = bin_idxs.cpu().tolist()
+            done_list = done.cpu().tolist()
+
             for b in range(B):
-                if done[b] or a_idxs[b] == EOS_IDX:
+                if done_list[b] or a_list[b] == EOS_IDX:
                     continue
-                a_idx   = int(a_idxs[b].item())
-                i_idx   = int(i_idxs[b].item())
-                bin_idx = int(bin_idxs[b].item())
-                current_dts[b] = current_dts[b] + pd.Timedelta(seconds=bin_to_seconds(bin_idx))
+                a_idx   = a_list[b]
+                i_idx   = i_list[b]
+                bin_idx = bin_list[b]
+                current_dts[b] += pd.Timedelta(seconds=BIN_SECONDS_LUT[bin_idx])
                 sku_out = None
                 if i_idx > 0:
                     sku_out = idx2sku.get(i_idx, i_idx - 1) if idx2sku else i_idx - 1
                 events_out[b].append({
-                    "client_id":  batch_inputs[b][0],
+                    "client_id":  client_ids[b],
                     "event_type": IDX2ACTION[a_idx],
                     "sku":        sku_out,
                     "timestamp":  current_dts[b],
                 })
 
-            # Grow sequence tensors (all sessions, incl. done -keeps shape uniform)
-            # poor implementation that needs to get fixed as well, 
-            cur_e = torch.cat([cur_e, a_idxs.unsqueeze(1)], dim=1)
-            cur_i = torch.cat([cur_i, i_idxs.unsqueeze(1)], dim=1)
-            cur_d = torch.cat([cur_d, bin_idxs.unsqueeze(1)], dim=1)
+            with autocast_ctx:
+                pos_t = torch.tensor([[step + 1]], dtype=torch.long, device=device)
+                x = (
+                    self.event_emb(a_idxs.unsqueeze(1))
+                    + self.item_emb(i_idxs.unsqueeze(1))
+                    + self.delta_emb(bin_idxs.unsqueeze(1))
+                    + self.pos_emb(pos_t)
+                )
+                x = self._run_decoder_prealloc(x, kv_buf, t=step + 1, memory=memory)
 
             last_action_idxs = torch.where(done, last_action_idxs, a_idxs)
             done = newly_done
 
         return events_out
+
+    def _run_decoder_prealloc(
+        self,
+        x: Tensor,
+        kv_buf: List[Tensor],  # [n_layers] of [B, max_steps+1, d_model] pre-allocated
+        t: int,                # current time step (0 = seed)
+        memory: Tensor,
+    ) -> Tensor:
+        """
+        Pass x [B, 1, d_model] through all decoder layers using pre-allocated KV buffers.
+        Writes layer-l input into kv_buf[l][:, t, :] then attends to kv_buf[l][:, :t+1, :].
+        No torch.cat — just in-place writes + contiguous slice views.
+        """
+        for l, layer in enumerate(self.decoder.layers):
+            x_in = x
+            kv_buf[l][:, t:t+1, :] = x_in           # write layer-l input at step t
+            kv_full = kv_buf[l][:, :t+1, :]          # view: positions 0..t (includes x_in)
+            x = self._decoder_layer_step(layer, x_in, kv_full, memory)
+        return x
+
+    def _decoder_layer_step(
+        self,
+        layer: nn.TransformerDecoderLayer,
+        x_new: Tensor,    # [B, 1, d_model]  — query (current token)
+        kv_full: Tensor,  # [B, t+1, d_model] — key/value (all positions 0..t, including x_new)
+        memory: Tensor,   # [B, m, d_model]
+    ) -> Tensor:          # [B, 1, d_model]
+        """
+        Single-step post-norm decoder layer forward.
+        kv_full already includes x_new at the last position — no torch.cat needed.
+        """
+        # Self-attention + residual + norm
+        sa = layer.self_attn(x_new, kv_full, kv_full, need_weights=False)[0]
+        x  = layer.norm1(x_new + layer.dropout1(sa))
+
+        # Cross-attention + residual + norm
+        ca = layer.multihead_attn(x, memory, memory, need_weights=False)[0]
+        x  = layer.norm2(x + layer.dropout2(ca))
+
+        # FFN + residual + norm
+        ff = layer.linear2(layer.dropout(layer.activation(layer.linear1(x))))
+        x  = layer.norm3(x + layer.dropout3(ff))
+
+        return x
 
     # Checkpoint I/O
 
