@@ -36,7 +36,7 @@ import torch
 from collections import defaultdict
 from pathlib import Path
 
-from config import MODEL_DIR, MODEL_NAME, MODEL_SUBDIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR
+from config import MODEL_DIR, MODEL_NAME, MODEL_SUBDIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR, INFER_TEMPERATURE
 from evaluation.fidelity import FidelityEvaluator
 from evaluation.orchestrator import EvaluationOrchestrator
 from evaluation.reference import RealDataLoader, ReferenceProfiler, ReferenceStore
@@ -100,12 +100,14 @@ def build_transformer_generator(ref_store: ReferenceStore) -> SessionGenerator:
     sampler_path   = MODEL_DIR / "identity_sampler.pkl"
     validity_layer = ValidityLayer(legal_bigrams=ref_store.legal_bigrams_set())
     device         = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"  Inference temperature: {INFER_TEMPERATURE}")
     return SessionGenerator(
         model_path            = model_path,
         validity_layer        = validity_layer,
         valid_transitions     = valid_transitions,
         identity_sampler_path = str(sampler_path) if sampler_path.exists() else None,
         device                = device,
+        temperature           = INFER_TEMPERATURE,
     )
 
 

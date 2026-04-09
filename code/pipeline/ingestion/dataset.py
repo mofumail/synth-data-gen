@@ -3,9 +3,13 @@ SessionDataset + InteractionGenerator
 
 PyTorch Dataset wrapping events_clean.parquet for SessionTransformer training.
 
-Each item is one session: (events, items, deltas) tensors used as input to
+Each item is one session: (events, codes, deltas) tensors used as input to
 SessionTransformer.forward(). The forward() method internally shifts by 1
 (input t=0..T-2, target t=1..T-1), so we store the full session here.
+
+Items are represented as RQ-VAE codes: each event has N_CODE_LEVELS=3 code
+indices from a codebook of size RQVAE_CODEBOOK_SIZE=128. Run
+`uv run python ingestion/rqvae.py` first to generate sku2codes.joblib.
 
 Splits (from config):
     train : timestamp < TRAIN_CUTOFF
@@ -28,15 +32,18 @@ from torch.utils.data import DataLoader, Dataset
 from collections import defaultdict
 
 from config import (
-    CLEAN_PARQUET, HISTORY_WINDOW, OUTPUT_DIR, TRAIN_CUTOFF, VAL_CUTOFF, VOCAB_K,
+    CLEAN_PARQUET, HISTORY_WINDOW, OUTPUT_DIR, TRAIN_CUTOFF, VAL_CUTOFF,
+    SKU2CODES_PATH, RQVAE_N_LEVELS,
 )
 from simulation.generator.session_transformer import (
     ACTION2IDX, BIN_EDGES, EOS_IDX, N_TEMPORAL_BINS, TEMPORAL_MIN_S, TEMPORAL_MAX_S,
 )
 
+N_CODE_LEVELS = RQVAE_N_LEVELS   # 3
+
 
 def _cache_path(split: str, max_length: int, min_length: int, max_sessions) -> str:
-    tag = f"{split}_ml{max_length}_min{min_length}_ms{max_sessions or 'all'}"
+    tag = f"{split}_ml{max_length}_min{min_length}_ms{max_sessions or 'all'}_rqvae"
     return str(OUTPUT_DIR / f"session_cache_{tag}.joblib")
 
 
@@ -46,40 +53,19 @@ def _cache_valid(cache_file: str, parquet_path: str) -> bool:
         return False
     return os.path.getmtime(cache_file) >= os.path.getmtime(parquet_path)
 
-SKU2IDX_PATH = OUTPUT_DIR / "sku2idx.joblib"
 
-
-def build_sku2idx(df_train_skus: pd.Series) -> dict:
+def get_sku2codes() -> tuple:
     """
-    Map the top-(VOCAB_K-1) most frequent SKUs to indices 1..VOCAB_K-1.
-    Index 0 is reserved for padding / unknown items.
+    Load (sku2codes, codes2sku) from SKU2CODES_PATH.
+    Raises RuntimeError if the file is not found — run ingestion/rqvae.py first.
     """
-    top_skus = (
-        df_train_skus
-        .dropna()
-        .astype(int)
-        .value_counts()
-        .head(VOCAB_K - 1)
-        .index
-        .tolist()
-    )
-    return {sku: idx + 1 for idx, sku in enumerate(top_skus)}
-
-
-def get_sku2idx(df_train_skus: pd.Series = None) -> dict:
-    """Load cached sku2idx or build and cache it."""
-    if SKU2IDX_PATH.exists():
-        return joblib.load(SKU2IDX_PATH)
-    if df_train_skus is None:
+    if not SKU2CODES_PATH.exists():
         raise RuntimeError(
-            f"sku2idx not found at {SKU2IDX_PATH}. "
-            "Pass df_train_skus to build it."
+            f"sku2codes not found at {SKU2CODES_PATH}. "
+            "Run `uv run python ingestion/rqvae.py` first to train the RQ-VAE "
+            "and build the item code mapping."
         )
-    mapping = build_sku2idx(df_train_skus)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(mapping, SKU2IDX_PATH)
-    print(f"  sku2idx saved -> {SKU2IDX_PATH}  ({len(mapping):,} SKUs)")
-    return mapping
+    return joblib.load(SKU2CODES_PATH)
 
 
 class SessionDataset(Dataset):
@@ -87,13 +73,13 @@ class SessionDataset(Dataset):
     One item = one session.
 
     __getitem__ returns:
-        events  : LongTensor [T]   action indices (ACTION2IDX)
-        items   : LongTensor [T]   sku+1 for item-bearing events; 0 otherwise
-        deltas  : LongTensor [T]   temporal bin indices (first event = bin 0)
-        length  : int              actual session length T (before padding)
-        history : dict | None      cross-session context from prior sessions of
-                                   the same user (keys: events, items, deltas,
-                                   length); None for first session of a user
+        events  : LongTensor [T]     action indices (ACTION2IDX)
+        codes   : LongTensor [T, 3]  RQ-VAE item codes; (0,0,0) for non-item events
+        deltas  : LongTensor [T]     temporal bin indices (first event = bin 0)
+        length  : int                actual session length T (before padding)
+        history : dict | None        cross-session context from prior sessions of
+                                     the same user (keys: events, codes, deltas,
+                                     length); None for first session of a user
 
     Sessions shorter than min_length are excluded.
     Sessions longer than max_length are truncated (most-recent events kept).
@@ -148,21 +134,8 @@ class SessionDataset(Dataset):
         else:
             raise ValueError(f"split must be 'train', 'val', or 'test'; got '{split}'")
 
-        # Build / load sku->embedding-index mapping (train split only, cached to disk).
-        # When split != 'train', df contains only val/test rows so train_filter yields
-        # nothing -rely on the cache built during the first train run instead.
-        if SKU2IDX_PATH.exists():
-            sku2idx = get_sku2idx()
-        elif split == "train":
-            sku2idx = get_sku2idx(df.select("sku").to_series().to_pandas())
-        else:
-            raise RuntimeError(
-                f"sku2idx cache not found at {SKU2IDX_PATH}. "
-                "Run SessionDataset(split='train') first to build the vocabulary."
-            )
-
-        #  Vectorised feature computation (stays in Rust/numpy), replaced with Polars because Pandas enjoys
-        #  jumping back to Python code instead of staying in C
+        # Load RQ-VAE item code mapping (built by ingestion/rqvae.py)
+        sku2codes, _ = get_sku2codes()
 
         # Action indices via polars replace
         df = df.with_columns(
@@ -172,15 +145,24 @@ class SessionDataset(Dataset):
             .alias("action_idx")
         )
 
-        # Item indices via join against sku2idx mapping
-        sku2idx_df = pl.DataFrame(
-            {"sku": list(sku2idx.keys()), "item_idx": list(sku2idx.values())},
-            schema={"sku": pl.Int64, "item_idx": pl.Int32},
+        # RQ-VAE code indices via join against sku2codes mapping
+        codes_df = pl.DataFrame(
+            {
+                "sku": list(sku2codes.keys()),
+                "c0":  [int(v[0]) for v in sku2codes.values()],
+                "c1":  [int(v[1]) for v in sku2codes.values()],
+                "c2":  [int(v[2]) for v in sku2codes.values()],
+            },
+            schema={"sku": pl.Int64, "c0": pl.Int32, "c1": pl.Int32, "c2": pl.Int32},
         )
         df = (
             df.with_columns(pl.col("sku").cast(pl.Int64, strict=False))
-            .join(sku2idx_df, on="sku", how="left")
-            .with_columns(pl.col("item_idx").fill_null(0))
+            .join(codes_df, on="sku", how="left")
+            .with_columns([
+                pl.col("c0").fill_null(0),
+                pl.col("c1").fill_null(0),
+                pl.col("c2").fill_null(0),
+            ])
         )
 
         # Temporal delta (seconds) within session -vectorised diff
@@ -210,7 +192,9 @@ class SessionDataset(Dataset):
             .agg(
                 pl.col("client_id").first().alias("client_id"),
                 pl.col("action_idx").alias("actions"),
-                pl.col("item_idx").alias("items"),
+                pl.col("c0").alias("c0_list"),
+                pl.col("c1").alias("c1_list"),
+                pl.col("c2").alias("c2_list"),
                 pl.col("delta_bin").alias("deltas"),
                 pl.len().alias("n"),
             )
@@ -220,27 +204,29 @@ class SessionDataset(Dataset):
             sessions_df = sessions_df.head(max_sessions)
 
         # Single Python pass: build numpy records from polars lists.
-        # EOS is appended as the final token so the model learns session termination
-        # from real boundaries (PvA §5.3). One slot is reserved from max_length.
-        # Stored as numpy arrays (not torch tensors) so joblib cache is fast to save/load;
-        # conversion to tensors happens lazily in __getitem__.
+        # EOS is appended as the final token so the model learns session termination.
+        # Codes for EOS token = (0, 0, 0) (padding triple).
         self._sessions: List[Dict] = []
         for row in sessions_df.iter_rows(named=True):
             n_raw   = min(int(row["n"]), max_length - 1)   # reserve one slot for EOS
             actions = row["actions"][-n_raw:] + [EOS_IDX]
-            items   = row["items"][-n_raw:]   + [0]
+            c0      = row["c0_list"][-n_raw:] + [0]
+            c1      = row["c1_list"][-n_raw:] + [0]
+            c2      = row["c2_list"][-n_raw:] + [0]
             deltas  = row["deltas"][-n_raw:]  + [0]
             n       = n_raw + 1
+            # codes: [T, N_CODE_LEVELS] array
+            codes   = np.stack([c0, c1, c2], axis=1).astype(np.int32)
 
             self._sessions.append({
                 "client_id": int(row["client_id"]),
                 "events":    np.array(actions, dtype=np.int64),
-                "items":     np.array(items,   dtype=np.int64),
+                "codes":     codes,                            # [T, 3]
                 "deltas":    np.array(deltas,  dtype=np.int64),
                 "length":    n,
             })
 
-        # Build per-user ordered index (session_id is time-based so order is preserved)
+        # Build per-user ordered index
         user_idx: dict = defaultdict(list)
         for i, s in enumerate(self._sessions):
             user_idx[s["client_id"]].append(i)
@@ -271,12 +257,12 @@ class SessionDataset(Dataset):
 
         if prior_idxs:
             prior_e = np.concatenate([self._sessions[i]["events"] for i in prior_idxs])
-            prior_i = np.concatenate([self._sessions[i]["items"]  for i in prior_idxs])
+            prior_c = np.concatenate([self._sessions[i]["codes"]  for i in prior_idxs])  # [H_all, 3]
             prior_d = np.concatenate([self._sessions[i]["deltas"] for i in prior_idxs])
             H = min(len(prior_e), self._history_window)
             history = {
                 "events": torch.from_numpy(prior_e[-H:]),
-                "items":  torch.from_numpy(prior_i[-H:]),
+                "codes":  torch.from_numpy(prior_c[-H:]),   # [H, 3]
                 "deltas": torch.from_numpy(prior_d[-H:]),
                 "length": H,
             }
@@ -286,7 +272,7 @@ class SessionDataset(Dataset):
         return {
             "client_id": sess["client_id"],
             "events":    torch.from_numpy(sess["events"]),
-            "items":     torch.from_numpy(sess["items"]),
+            "codes":     torch.from_numpy(sess["codes"]),   # [T, 3]
             "deltas":    torch.from_numpy(sess["deltas"]),
             "length":    sess["length"],
             "history":   history,
@@ -299,13 +285,13 @@ def collate_fn(batch: List[Dict]) -> Dict:
 
     Returns dict:
         events              : LongTensor [B, T_max]
-        items               : LongTensor [B, T_max]
+        codes               : LongTensor [B, T_max, 3]
         deltas              : LongTensor [B, T_max]
         lengths             : LongTensor [B]
         tgt_key_padding_mask: BoolTensor [B, T_max-1]  True = padded position
         history             : dict | None
             events          : LongTensor [B, H_max]
-            items           : LongTensor [B, H_max]
+            codes           : LongTensor [B, H_max, 3]
             deltas          : LongTensor [B, H_max]
             padding_mask    : BoolTensor [B, H_max]   True = padded position
     """
@@ -313,16 +299,16 @@ def collate_fn(batch: List[Dict]) -> Dict:
     B = len(batch)
 
     ev = torch.zeros(B, max_len, dtype=torch.long)
-    it = torch.zeros(B, max_len, dtype=torch.long)
+    co = torch.zeros(B, max_len, N_CODE_LEVELS, dtype=torch.long)
     dl = torch.zeros(B, max_len, dtype=torch.long)
     ln = torch.zeros(B, dtype=torch.long)
 
     for i, s in enumerate(batch):
         L = s["length"]
-        ev[i, :L] = s["events"]
-        it[i, :L] = s["items"]
-        dl[i, :L] = s["deltas"]
-        ln[i]     = L
+        ev[i, :L]    = s["events"]
+        co[i, :L, :] = s["codes"]
+        dl[i, :L]    = s["deltas"]
+        ln[i]        = L
 
     # Padding mask for transformer input (positions T-1 since forward shifts by 1)
     mask_len = max_len - 1
@@ -335,27 +321,27 @@ def collate_fn(batch: List[Dict]) -> Dict:
     # History: pad to max history length in batch; None if no session has history
     histories = [s.get("history") for s in batch]
     if any(h is not None for h in histories):
-        max_H = max((h["length"] for h in histories if h is not None), default=0)
+        max_H  = max((h["length"] for h in histories if h is not None), default=0)
         h_e    = torch.zeros(B, max_H, dtype=torch.long)
-        h_i    = torch.zeros(B, max_H, dtype=torch.long)
+        h_c    = torch.zeros(B, max_H, N_CODE_LEVELS, dtype=torch.long)
         h_d    = torch.zeros(B, max_H, dtype=torch.long)
         h_mask = torch.ones(B, max_H, dtype=torch.bool)   # True = padding
         for b, h in enumerate(histories):
             if h is not None:
                 H = h["length"]
-                h_e[b, :H]    = h["events"]
-                h_i[b, :H]    = h["items"]
-                h_d[b, :H]    = h["deltas"]
-                h_mask[b, :H] = False   # real positions are not masked
+                h_e[b, :H]       = h["events"]
+                h_c[b, :H, :]    = h["codes"]
+                h_d[b, :H]       = h["deltas"]
+                h_mask[b, :H]    = False   # real positions are not masked
         history_out: Optional[Dict] = {
-            "events": h_e, "items": h_i, "deltas": h_d, "padding_mask": h_mask,
+            "events": h_e, "codes": h_c, "deltas": h_d, "padding_mask": h_mask,
         }
     else:
         history_out = None
 
     return {
         "events":               ev,
-        "items":                it,
+        "codes":                co,
         "deltas":               dl,
         "lengths":              ln,
         "tgt_key_padding_mask": pad_mask,

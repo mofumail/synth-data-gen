@@ -3,20 +3,30 @@ SessionTransformer training script.
 
 Three factored cross-entropy losses:
     action_loss   : CE over all real positions
-    item_loss     : CE restricted to item-bearing target positions
+    item_loss     : mean CE over N_CODE_LEVELS RQ-VAE code levels,
+                    restricted to item-bearing target positions
     temporal_loss : CE over all real positions
 
 All hyperparameters are read from config.yaml.
 
 Usage:
     PYTHONPATH=. uv run python train.py
+    PYTHONPATH=. uv run python train.py --rebuild   # delete and rebuild RQ-VAE + CTGAN first
 
-Checkpoint saved to MODEL_DIR/session_transformer.pt on val loss improvement.
-A config.yaml snapshot is written to MODEL_DIR alongside the checkpoint.
+Checkpoint saved to MODEL_SUBDIR/model.pt on val loss improvement.
+A config.yaml snapshot is written to MODEL_SUBDIR alongside the checkpoint.
 """
 
+import argparse
+import logging
 import time
+import warnings
 from pathlib import Path
+
+# Suppress known false-positive / deprecation warnings
+warnings.filterwarnings("ignore", message="Support for mismatched key_padding_mask and attn_mask")
+warnings.filterwarnings("ignore", message="Detected call of `lr_scheduler.step\\(\\)` before `optimizer.step\\(\\)`")
+logging.getLogger("torch._inductor.utils").setLevel(logging.ERROR)
 
 import yaml
 import wandb
@@ -28,16 +38,21 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from config import (
-    MODEL_DIR, MODEL_NAME, MODEL_SUBDIR, VOCAB_K, N_TEMPORAL_BINS, HISTORY_WINDOW,
+    MODEL_DIR, MODEL_NAME, MODEL_SUBDIR, N_TEMPORAL_BINS, HISTORY_WINDOW,
     TRAIN_EPOCHS, TRAIN_BATCH_SIZE, TRAIN_MAX_LENGTH,
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
     TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
+    RQVAE_CODEBOOK_SIZE, RQVAE_N_LEVELS, SKU2CODES_PATH, RQVAE_MODEL_PATH,
+    ITEM2VEC_PATH,
+    ITEM_LOSS_ALPHA, ITEM_LABEL_SMOOTHING,
+    CLEAN_PARQUET, TRAIN_CUTOFF,
 )
 from ingestion.dataset import InteractionGenerator
 from simulation.generator.session_transformer import (
     SessionTransformer,
     N_ACTIONS,
     ITEM_BEARING_IDX,
+    N_CODE_LEVELS,
 )
 
 
@@ -51,9 +66,94 @@ def build_target_mask(lengths: torch.Tensor, T_out: int, device) -> torch.Tensor
     return positions < (lengths.to(device).unsqueeze(1) - 1)       # [B, T_out]
 
 
+def build_item_loss_weights(device, alpha: float) -> list:
+    """
+    Per-level inverse-frequency weights for item CE loss (popularity debiasing).
+
+    For each RQ-VAE code level k, count how often each code c appears as a target
+    in training data. Weight w_k[c] = 1 / (freq + 1)^alpha, normalized so that
+    mean weight = 1 (keeps the loss magnitude comparable across alpha values).
+
+    freq[code_k] = sum of SKU frequencies over all SKUs whose triple has
+    sku2codes[sku][k] == code. This matches the gradient distribution seen
+    during training (events are sampled from event frequency, not SKU uniqueness).
+
+    alpha=0   → uniform (disabled)
+    alpha=0.5 → sqrt-inverse frequency (standard recsys long-tail fix)
+    alpha=1.0 → full inverse frequency (aggressive)
+
+    Returns:
+        list of N_CODE_LEVELS tensors, each shape [RQVAE_CODEBOOK_SIZE] on device
+    """
+    import polars as pl
+    from ingestion.rqvae import load_sku2codes
+
+    if alpha <= 0:
+        print(f"  item_loss_alpha={alpha} → uniform weights (debiasing disabled)")
+        return [torch.ones(RQVAE_CODEBOOK_SIZE, device=device) for _ in range(N_CODE_LEVELS)]
+
+    sku2codes, _ = load_sku2codes()
+
+    freq_df = (
+        pl.scan_parquet(str(CLEAN_PARQUET))
+        .filter(pl.col("timestamp") < pl.lit(TRAIN_CUTOFF).str.to_datetime())
+        .filter(pl.col("sku").is_not_null())
+        .group_by("sku")
+        .agg(pl.len().alias("freq"))
+        .collect()
+    )
+    sku_freq = {int(r["sku"]): int(r["freq"]) for r in freq_df.iter_rows(named=True)}
+
+    code_freq = torch.zeros(N_CODE_LEVELS, RQVAE_CODEBOOK_SIZE, dtype=torch.float64)
+    for sku, triple in sku2codes.items():
+        f = sku_freq.get(sku, 0)
+        if f == 0:
+            continue
+        for k in range(N_CODE_LEVELS):
+            code_freq[k, triple[k]] += f
+
+    weights = []
+    for k in range(N_CODE_LEVELS):
+        w = 1.0 / (code_freq[k] + 1.0) ** alpha
+        w = w / w.mean()                                          # normalize so mean=1
+        weights.append(w.to(device=device, dtype=torch.float32))
+        nz  = int((code_freq[k] > 0).sum().item())
+        mn, mx = float(w.min()), float(w.max())
+        print(f"  item_loss_weights[level {k}]: {nz}/{RQVAE_CODEBOOK_SIZE} codes active, "
+              f"weight range [{mn:.3f}, {mx:.3f}]")
+
+    return weights
+
+
+def _ensure_prerequisites():
+    """Train RQ-VAE and CTGAN if their artifacts are not already present."""
+    from config import MODEL_DIR
+
+    # RQ-VAE — required for dataset item encoding
+    if SKU2CODES_PATH.exists():
+        print(f"  sku2codes found — skipping RQ-VAE training.")
+    else:
+        print("\n  sku2codes not found — training RQ-VAE first ...")
+        from ingestion.rqvae import train_rqvae, build_sku2codes
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        model  = train_rqvae(device=device)
+        build_sku2codes(model, device=device)
+
+    # CTGAN — required for session generation seeding at evaluation time
+    ctgan_path = MODEL_DIR / "identity_sampler.pkl"
+    if ctgan_path.exists():
+        print(f"  identity_sampler found — skipping CTGAN training.")
+    else:
+        print("\n  identity_sampler not found — training CTGAN ...")
+        from simulation.identity.CTGAN import IdentityFactory
+        factory = IdentityFactory()
+        factory.fit()
+
+
 def train():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
+    _ensure_prerequisites()
     print(f"Config: epochs={TRAIN_EPOCHS}, batch={TRAIN_BATCH_SIZE}, "
           f"d_model={TRAIN_D_MODEL}, layers={TRAIN_N_LAYERS}, heads={TRAIN_N_HEADS}, "
           f"lr={TRAIN_LR}, max_sessions={TRAIN_MAX_SESSIONS}")
@@ -62,18 +162,21 @@ def train():
         project="thesis-session-transformer",
         name=MODEL_NAME,
         config={
-            "model":           MODEL_NAME,
-            "epochs":          TRAIN_EPOCHS,
-            "batch_size":      TRAIN_BATCH_SIZE,
-            "max_length":      TRAIN_MAX_LENGTH,
-            "lr":              TRAIN_LR,
-            "d_model":         TRAIN_D_MODEL,
-            "n_layers":        TRAIN_N_LAYERS,
-            "n_heads":         TRAIN_N_HEADS,
-            "vocab_k":         VOCAB_K,
-            "n_temporal_bins": N_TEMPORAL_BINS,
-            "history_window":  HISTORY_WINDOW,
-            "max_sessions":    TRAIN_MAX_SESSIONS,
+            "model":              MODEL_NAME,
+            "epochs":             TRAIN_EPOCHS,
+            "batch_size":         TRAIN_BATCH_SIZE,
+            "max_length":         TRAIN_MAX_LENGTH,
+            "lr":                 TRAIN_LR,
+            "d_model":            TRAIN_D_MODEL,
+            "n_layers":           TRAIN_N_LAYERS,
+            "n_heads":            TRAIN_N_HEADS,
+            "rqvae_codebook_size":  RQVAE_CODEBOOK_SIZE,
+            "rqvae_n_levels":       RQVAE_N_LEVELS,
+            "n_temporal_bins":      N_TEMPORAL_BINS,
+            "history_window":       HISTORY_WINDOW,
+            "max_sessions":         TRAIN_MAX_SESSIONS,
+            "item_loss_alpha":      ITEM_LOSS_ALPHA,
+            "item_label_smoothing": ITEM_LABEL_SMOOTHING,
         },
     )
 
@@ -105,7 +208,8 @@ def train():
 
     # Model
     model = SessionTransformer(
-        vocab_size=VOCAB_K,
+        codebook_size=RQVAE_CODEBOOK_SIZE,
+        n_code_levels=RQVAE_N_LEVELS,
         d_model=TRAIN_D_MODEL,
         n_layers=TRAIN_N_LAYERS,
         n_heads=TRAIN_N_HEADS,
@@ -117,6 +221,10 @@ def train():
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {n_params:,}")
+
+    print(f"\nBuilding per-level inverse-freq weights for item CE "
+          f"(alpha={ITEM_LOSS_ALPHA}, label_smoothing={ITEM_LABEL_SMOOTHING}) ...")
+    item_loss_weights = build_item_loss_weights(device, alpha=ITEM_LOSS_ALPHA)
 
     optimizer = AdamW(model.parameters(), lr=TRAIN_LR, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=TRAIN_EPOCHS * len(gen), eta_min=1e-6)
@@ -135,7 +243,7 @@ def train():
         train_bar = tqdm(gen.loader, desc=f"Epoch {epoch}/{TRAIN_EPOCHS} train", leave=False)
         for batch in train_bar:
             events   = batch["events"].to(device)               # [B, T]
-            items    = batch["items"].to(device)                # [B, T]
+            codes    = batch["codes"].to(device)                # [B, T, N_CODE_LEVELS]
             deltas   = batch["deltas"].to(device)               # [B, T]
             pad_mask = batch["tgt_key_padding_mask"].to(device) # [B, T-1]
             lengths  = batch["lengths"]                         # [B]
@@ -147,9 +255,9 @@ def train():
             T_out = T - 1
 
             # Targets
-            tgt_actions = events[:, 1:]   # [B, T-1]
-            tgt_items   = items[:, 1:]    # [B, T-1]
-            tgt_deltas  = deltas[:, 1:]   # [B, T-1]
+            tgt_actions = events[:, 1:]         # [B, T-1]
+            tgt_codes   = codes[:, 1:]          # [B, T-1, N_CODE_LEVELS]
+            tgt_deltas  = deltas[:, 1:]         # [B, T-1]
 
             # Valid position mask (real, non-padded targets)
             valid = build_target_mask(lengths, T_out, device)  # [B, T-1]
@@ -160,33 +268,42 @@ def train():
                 tgt_is_item |= (tgt_actions == idx)
             item_valid = valid & tgt_is_item  # [B, T-1]
 
-            # Forward (teacher-forced); item_logits are sparse [M, vocab_size]
+            # Forward (teacher-forced); item_logits_list[k] is sparse [M, codebook_size]
             with autocast("cuda"):
-                action_logits, item_logits, temporal_logits = model(
-                    events, items, deltas,
+                action_logits, item_logits_list, temporal_logits = model(
+                    events, codes, deltas,
                     history=history,
                     tgt_key_padding_mask=pad_mask,
                     item_mask=item_valid,
                 )
-                # action_logits:   [B, T-1, n_actions]
-                # item_logits:     [M, vocab_size]   M = item_valid.sum()
-                # temporal_logits: [B, T-1, n_bins]
+                # action_logits:    [B, T-1, n_actions]
+                # item_logits_list: list of N_CODE_LEVELS tensors [M, codebook_size]
+                # temporal_logits:  [B, T-1, n_bins]
 
                 # Action loss
-                a_logits = action_logits[valid]          # [N, N_ACTIONS]
-                a_tgt    = tgt_actions[valid]            # [N]
+                a_logits    = action_logits[valid]          # [N, N_ACTIONS]
+                a_tgt       = tgt_actions[valid]            # [N]
                 action_loss = F.cross_entropy(a_logits, a_tgt)
 
-                # Item loss (sparse logits already at item positions)
+                # Item loss: mean CE over N_CODE_LEVELS code levels
+                # Inverse-freq weights debiases popular codes; label smoothing prevents
+                # over-confident concentration on a handful of triples.
                 if item_valid.any():
-                    i_tgt     = tgt_items[item_valid]    # [M]
-                    item_loss = F.cross_entropy(item_logits, i_tgt)
+                    item_loss = sum(
+                        F.cross_entropy(
+                            item_logits_list[k],
+                            tgt_codes[:, :, k][item_valid],
+                            weight=item_loss_weights[k],
+                            label_smoothing=ITEM_LABEL_SMOOTHING,
+                        )
+                        for k in range(N_CODE_LEVELS)
+                    ) / N_CODE_LEVELS
                 else:
                     item_loss = torch.zeros(1, device=device).squeeze()
 
                 # Temporal loss
-                d_logits = temporal_logits[valid]        # [N, N_BINS]
-                d_tgt    = tgt_deltas[valid]             # [N]
+                d_logits      = temporal_logits[valid]      # [N, N_BINS]
+                d_tgt         = tgt_deltas[valid]           # [N]
                 temporal_loss = F.cross_entropy(d_logits, d_tgt)
 
                 loss = action_loss + item_loss + temporal_loss
@@ -223,7 +340,7 @@ def train():
                     "epoch": epoch,
                 }, step=global_step)
 
-        elapsed  = time.time() - t0
+        elapsed      = time.time() - t0
         avg_action   = epoch_action   / epoch_batches
         avg_item     = epoch_item     / epoch_batches
         avg_temporal = epoch_temporal / epoch_batches
@@ -244,7 +361,7 @@ def train():
             val_bar = tqdm(val_gen.loader, desc=f"Epoch {epoch}/{TRAIN_EPOCHS} val  ", leave=False)
             for batch in val_bar:
                 events   = batch["events"].to(device)
-                items    = batch["items"].to(device)
+                codes    = batch["codes"].to(device)
                 deltas   = batch["deltas"].to(device)
                 pad_mask = batch["tgt_key_padding_mask"].to(device)
                 lengths  = batch["lengths"]
@@ -255,7 +372,7 @@ def train():
                 B, T  = events.shape
                 T_out = T - 1
                 tgt_actions = events[:, 1:]
-                tgt_items   = items[:, 1:]
+                tgt_codes   = codes[:, 1:]
                 tgt_deltas  = deltas[:, 1:]
                 valid       = build_target_mask(lengths, T_out, device)
 
@@ -265,8 +382,8 @@ def train():
                 item_valid = valid & tgt_is_item
 
                 with autocast("cuda"):
-                    action_logits, item_logits, temporal_logits = model(
-                        events, items, deltas,
+                    action_logits, item_logits_list, temporal_logits = model(
+                        events, codes, deltas,
                         history=history,
                         tgt_key_padding_mask=pad_mask,
                         item_mask=item_valid,
@@ -275,7 +392,15 @@ def train():
                     val_action_loss = F.cross_entropy(a_logits, tgt_actions[valid])
 
                     if item_valid.any():
-                        val_item_loss = F.cross_entropy(item_logits, tgt_items[item_valid])
+                        val_item_loss = sum(
+                            F.cross_entropy(
+                                item_logits_list[k],
+                                tgt_codes[:, :, k][item_valid],
+                                weight=item_loss_weights[k],
+                                label_smoothing=ITEM_LABEL_SMOOTHING,
+                            )
+                            for k in range(N_CODE_LEVELS)
+                        ) / N_CODE_LEVELS
                     else:
                         val_item_loss = torch.zeros(1, device=device).squeeze()
 
@@ -339,4 +464,17 @@ def train():
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--rebuild", action="store_true",
+                        help="Delete RQ-VAE and CTGAN artifacts and rebuild them from scratch.")
+    args = parser.parse_args()
+
+    if args.rebuild:
+        for path in [ITEM2VEC_PATH, SKU2CODES_PATH, RQVAE_MODEL_PATH, MODEL_DIR / "identity_sampler.pkl"]:
+            if path.exists():
+                path.unlink()
+                print(f"  Deleted {path}")
+            else:
+                print(f"  Already absent: {path}")
+
     train()

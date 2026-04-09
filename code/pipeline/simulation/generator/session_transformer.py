@@ -1,16 +1,16 @@
 """
 Autoregressive transformer for synthetic e-commerce session generation.
-Three factored prediction heads: ActionHead, ItemHead, TemporalHead.
+Three factored prediction heads: ActionHead, ItemHeadRQVAE, TemporalHead.
 
 Architecture:
-    x_t = event_emb(action_t) + item_emb(sku_t) + delta_emb(bin_t) + pos_emb(t)
+    x_t = event_emb(action_t) + sum_k(code_embs[k](code_t_k)) + delta_emb(bin_t) + pos_emb(t)
     h   = CausalTransformerDecoder(x, memory=CrossSessionHistory)
     action_t+1 ~ ActionHead(h_t)
-    item_t+1   ~ ItemHead(h_t, action_t+1)
-    delta_t+1  ~ TemporalHead(h_t, action_t+1, item_t+1)
+    item_t+1   ~ ItemHeadRQVAE(h_t)  -- 3 sequential 128-way heads (RQ-VAE codes)
+    delta_t+1  ~ TemporalHead(h_t, action_t+1, item_emb_t+1)
 
-Training  : teacher-forced; ItemHead/TemporalHead receive gold next-action.
-Inference : cascaded sampling, action -> item -> temporal.
+Training  : teacher-forced; ItemHeadRQVAE/TemporalHead receive gold next codes.
+Inference : cascaded sampling, action -> item (3 code levels) -> temporal.
 """
 
 from __future__ import annotations
@@ -26,7 +26,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from config import N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S, VOCAB_K
+from config import (
+    N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S,
+    RQVAE_CODEBOOK_SIZE, RQVAE_N_LEVELS,
+)
+
+CODEBOOK_SIZE = RQVAE_CODEBOOK_SIZE   # 128
+N_CODE_LEVELS = RQVAE_N_LEVELS        # 3
 
 # Action vocabulary, matches ALL_EVENT_TYPES + EOS
 ACTION_TYPES = [
@@ -67,7 +73,8 @@ def bin_to_seconds(bin_idx: int) -> float:
 class TransitionConstraintMask:
     """
     Pre-sampling mask: zeroes logits for illegal next actions.
-    Applied inside ActionHead at inference time.
+    Applied inside ActionHead at inference time (last_action_idx != None).
+    During training last_action_idx is None ->no masking ->standard cross-entropy.
 
     valid_transitions : action_str ->set[action_str]
                         EOS is always allowed from any state.
@@ -176,26 +183,39 @@ class ActionHead(nn.Module):
         return self.constraint_mask.apply(logits, last_action_idx)
 
 
-class ItemHead(nn.Module):
+class ItemHeadRQVAE(nn.Module):
     """
-    Predicts next SKU. Conditioned on action_t via a small action embedding
-    (avoids coupling the full 630K-embedding to this head).
-    Top-k is enforced at inference time in SessionTransformer.infer().
+    Predicts next item as N_CODE_LEVELS sequential 128-way softmaxes.
+
+    Head k receives [h_t, gold_emb_0, ..., gold_emb_{k-1}] concatenated,
+    so each level is conditioned on all previous gold code embeddings
+    (teacher-forced at train time; sampled codes at inference time).
+
+    This is ~1600× cheaper in memory than a single 630k-way head.
     """
 
-    def __init__(self, d_model: int, vocab_size: int, top_k: int = 100):
+    def __init__(self, d_model: int, codebook_size: int, n_levels: int):
         super().__init__()
-        self.fc          = nn.Linear(d_model, vocab_size)
-        self.top_k       = top_k
-        self.action_cond = nn.Embedding(N_ACTIONS, d_model)
+        self.n_levels = n_levels
+        self.heads = nn.ModuleList([
+            nn.Linear(d_model * (1 + k), codebook_size)
+            for k in range(n_levels)
+        ])
 
     def forward(
         self,
-        h_t: torch.Tensor,       # [B, d_model] or [B, T, d_model]
-        action_t: torch.Tensor,  # [B] or [B, T] -action indices
-    ) -> torch.Tensor:           # [B, vocab_size] or [B, T, vocab_size]
-        cond = h_t + self.action_cond(action_t)
-        return self.fc(cond)
+        h_t: torch.Tensor,              # [M, d_model]
+        code_embs_gold: List[Tensor],   # list of (n_levels-1) tensors [M, d_model]
+    ) -> List[Tensor]:                  # list of n_levels tensors [M, codebook_size]
+        """
+        code_embs_gold : gold embeddings for levels 0 .. n_levels-2.
+        Head k uses code_embs_gold[:k] as conditioning (none for k=0).
+        """
+        logits = []
+        for k, head in enumerate(self.heads):
+            inp = torch.cat([h_t] + code_embs_gold[:k], dim=-1)   # [M, d*(1+k)]
+            logits.append(head(inp))                               # [M, codebook_size]
+        return logits
 
 
 class TemporalHead(nn.Module):
@@ -205,8 +225,8 @@ class TemporalHead(nn.Module):
     Fully factored conditioning:
         delta_{t+1} ~ TemporalHead(h_t, action_{t+1}, item_emb_{t+1})
 
-    item_emb_t is the pre-embedded item vector from SessionTransformer.item_emb,
-    passed in rather than re-embedded here to avoid a duplicate 630k-row table.
+    item_emb_t is the sum of RQ-VAE code embeddings for the next item,
+    passed in rather than re-embedded here to avoid duplicate tables.
 
     Training: action_t and item_emb_t use gold next tokens (teacher-forced).
     Inference: they use the sampled outputs of the upstream heads.
@@ -222,7 +242,7 @@ class TemporalHead(nn.Module):
         self,
         h_t: torch.Tensor,           # [B, d_model] or [B, T, d_model]
         action_t: torch.Tensor,      # [B] or [B, T]  -action indices
-        item_emb_t: torch.Tensor,    # [B, d_model] or [B, T, d_model] -pre-embedded item
+        item_emb_t: torch.Tensor,    # [B, d_model] or [B, T, d_model] -sum of code embeddings
     ) -> torch.Tensor:               # [B, n_bins] or [B, T, n_bins]
         cond = h_t + self.action_cond(action_t) + item_emb_t
         return self.fc(cond)
@@ -232,22 +252,27 @@ class TemporalHead(nn.Module):
 
 class SessionTransformer(nn.Module):
     """
-    Full autoregressive session generator.
+    Full autoregressive session generator with RQ-VAE item tokenisation.
 
     Training:
     loss = CE(action_logits, tgt_actions)
-         + CE(item_logits[item-bearing positions], tgt_items[item-bearing])
+         + mean_k CE(item_logits_list[k][item_positions], tgt_codes[k][item_positions])
          + CE(temporal_logits, tgt_deltas)
+
+    Items are represented as N_CODE_LEVELS=3 codes from a codebook of size 128.
+    Each item head is a 128-way softmax conditioned on previous code levels
+    (teacher-forced during training, sequential sampling at inference).
 
     Inference:
     Use SessionTransformer.infer(client_id, sku, start_dt, history).
 
     Args:
-    vocab_size        : unique SKUs -VOCAB_K = 630,052
+    codebook_size     : RQ-VAE codebook size per level (default CODEBOOK_SIZE=128)
+    n_code_levels     : number of RQ-VAE residual levels (default N_CODE_LEVELS=3)
     n_actions         : 5 event types + EOS = 6
-    d_model           : transformer hidden dimension (default 256)
+    d_model           : transformer hidden dimension (default 128)
     n_layers          : decoder layers (default 4)
-    n_heads           : attention heads (default 8)
+    n_heads           : attention heads (must divide d_model)
     n_temporal_bins   : delta_t bins (default 64)
     window_H          : cross-session history window size
     valid_transitions : dict action_str ->set[action_str] for constraint mask
@@ -255,22 +280,28 @@ class SessionTransformer(nn.Module):
 
     def __init__(
         self,
-        vocab_size: int,
+        codebook_size: int = CODEBOOK_SIZE,
+        n_code_levels: int = N_CODE_LEVELS,
         n_actions: int = N_ACTIONS,
-        d_model: int = 256,
+        d_model: int = 128,
         n_layers: int = 4,
-        n_heads: int = 8,
+        n_heads: int = 4,
         n_temporal_bins: int = N_TEMPORAL_BINS,
         window_H: int = 50,
         valid_transitions: dict = None,
     ):
         super().__init__()
-        self.d_model    = d_model
-        self.vocab_size = vocab_size
+        self.d_model      = d_model
+        self.codebook_size = codebook_size
+        self.n_code_levels = n_code_levels
 
         # Shared embedding tables
         self.event_emb = nn.Embedding(n_actions, d_model)
-        self.item_emb  = nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
+        # One codebook embedding per RQ-VAE level; item repr = sum of N_CODE_LEVELS lookups
+        self.code_embs = nn.ModuleList([
+            nn.Embedding(codebook_size, d_model, padding_idx=0)
+            for _ in range(n_code_levels)
+        ])
         self.delta_emb = nn.Embedding(n_temporal_bins, d_model)
         self.pos_emb   = nn.Embedding(512, d_model)
 
@@ -289,7 +320,7 @@ class SessionTransformer(nn.Module):
 
         # Prediction heads
         self.action_head   = ActionHead(d_model, n_actions, valid_transitions or {})
-        self.item_head     = ItemHead(d_model, vocab_size, top_k=100)
+        self.item_head     = ItemHeadRQVAE(d_model, codebook_size, n_code_levels)
         self.temporal_head = TemporalHead(d_model, n_temporal_bins)
 
     # Training forward (teacher-forced, gold conditioning)
@@ -297,9 +328,9 @@ class SessionTransformer(nn.Module):
     def forward(
         self,
         events: torch.Tensor,                         # [B, T] action indices
-        items: torch.Tensor,                          # [B, T] item indices (0=no item)
+        codes: torch.Tensor,                          # [B, T, N_CODE_LEVELS] item codes
         deltas: torch.Tensor,                         # [B, T] temporal bin indices
-        history: Optional[dict] = None,               # keys: events/items/deltas ->[B, H]
+        history: Optional[dict] = None,               # keys: events/codes/deltas ->[B, H]
         tgt_key_padding_mask: Optional[torch.Tensor] = None,  # [B, T-1] True=pad
         item_mask: Optional[torch.Tensor] = None,     # [B, T-1] bool -item positions only
     ):
@@ -311,54 +342,70 @@ class SessionTransformer(nn.Module):
 
         Returns:
         action_logits   : [B, T-1, n_actions]
-        item_logits     : [M, vocab_size]   if item_mask provided (M = item_mask.sum())
-                          [B, T-1, vocab_size]  otherwise (may OOM for large vocabs)
+        item_logits_list: list of N_CODE_LEVELS tensors [M, codebook_size]
+                          (M = item_mask.sum(); only item-bearing positions)
         temporal_logits : [B, T-1, n_bins]
 
-        item_mask should be precomputed in the training loop (valid & tgt_is_item)
-        to avoid allocating the full [B, T-1, vocab_size] tensor.
+        item_mask should be precomputed in the training loop (valid & tgt_is_item).
         """
-        in_e  = events[:, :-1]   # [B, T-1] -model input
-        in_i  = items[:, :-1]
+        in_e  = events[:, :-1]            # [B, T-1] -model input
+        in_c  = codes[:, :-1]             # [B, T-1, N_CODE_LEVELS]
         in_d  = deltas[:, :-1]
-        tgt_e = events[:, 1:]    # [B, T-1] -gold next actions (for conditioning)
-        tgt_i = items[:, 1:]     # [B, T-1] -gold next items
+        tgt_e = events[:, 1:]             # [B, T-1] -gold next actions
+        tgt_c = codes[:, 1:]              # [B, T-1, N_CODE_LEVELS] -gold next codes
 
         B, T = in_e.shape
         device = in_e.device
 
         pos = torch.arange(T, device=device).unsqueeze(0)   # [1, T]
+        # Item representation: sum of code embeddings across levels
+        item_repr = sum(self.code_embs[k](in_c[:, :, k]) for k in range(self.n_code_levels))
         x   = (
             self.event_emb(in_e)
-            + self.item_emb(in_i)
+            + item_repr
             + self.delta_emb(in_d)
             + self.pos_emb(pos)
         )  # [B, T, d_model]
 
-        memory = self._encode_history(history, B, device)  # [B, >=1, d_model]
+        memory   = self._encode_history(history, B, device)  # [B, >=1, d_model]
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device)
 
         h = self.decoder(
             x, memory,
+            tgt_mask=tgt_mask,
             tgt_is_causal=True,
             tgt_key_padding_mask=tgt_key_padding_mask,
         )  # [B, T, d_model]
 
         action_logits = self.action_head(h)                      # [B, T, n_actions]
 
-        # Pre-embed gold next items (shared table) for item + temporal heads
-        tgt_item_emb = self.item_emb(tgt_i)                     # [B, T, d_model]
-
+        # Pre-embed gold next items (sum of code embeddings) for temporal head
+        tgt_item_emb = sum(
+            self.code_embs[k](tgt_c[:, :, k]) for k in range(self.n_code_levels)
+        )  # [B, T, d_model]
         temporal_logits = self.temporal_head(h, tgt_e, tgt_item_emb)  # [B, T, n_bins]
 
+        # Item logits: sparse over item-bearing positions only
+        # Gold embeddings for levels 0..n_levels-2 used as sequential conditioning
         if item_mask is not None:
-            # Sparse: only compute item logits at item-bearing positions ->[M, vocab_size]
             h_item      = h[item_mask]       # [M, d_model]
-            tgt_e_item  = tgt_e[item_mask]   # [M]
-            item_logits = self.item_head(h_item, tgt_e_item)   # [M, vocab_size]
+            tgt_c_embs  = [
+                self.code_embs[k](tgt_c[:, :, k])[item_mask]
+                for k in range(self.n_code_levels)
+            ]  # list of N_LEVELS tensors [M, d_model]
+            # Pass all but last as gold conditioning (last head predicts level N-1)
+            item_logits_list = self.item_head(h_item, tgt_c_embs[:-1])
         else:
-            item_logits = self.item_head(h, tgt_e)             # [B, T, vocab_size]
+            # Dense path (not used in normal training; kept for debugging)
+            B_, T_ = h.shape[:2]
+            h_flat = h.reshape(B_ * T_, self.d_model)
+            tgt_c_embs = [
+                self.code_embs[k](tgt_c[:, :, k]).reshape(B_ * T_, self.d_model)
+                for k in range(self.n_code_levels)
+            ]
+            item_logits_list = self.item_head(h_flat, tgt_c_embs[:-1])
 
-        return action_logits, item_logits, temporal_logits
+        return action_logits, item_logits_list, temporal_logits
 
     # Autoregressive inference
 
@@ -377,7 +424,7 @@ class SessionTransformer(nn.Module):
 
         Args:
         client_id   : user id (from SimpleIdentitySampler)
-        sku         : seed item (0-indexed, from SimpleIdentitySampler)
+        sku         : seed item SKU integer
         start_dt    : session start time (datetime or pd.Timestamp)
         history     : past event dicts for cross-session conditioning
         max_steps   : max events before forced stop
@@ -399,15 +446,13 @@ class SessionTransformer(nn.Module):
         else:
             memory = torch.zeros(1, 1, self.d_model, device=device)
 
-        # Load sku2idx mapping for correct embedding lookup (trained with remapped indices)
-        sku2idx: dict = getattr(self, "_sku2idx", {})
-        idx2sku: dict = getattr(self, "_idx2sku", {})
+        sku2codes: dict = getattr(self, "_sku2codes", {})
+        codes2sku: dict = getattr(self, "_codes2sku", {})
 
         # Seed token: primes the generator with the seed item identity.
-        # Treated as a synthetic "exposure" at t=0; not emitted in output.
-        seed_item_idx = sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
+        seed_codes = sku2codes.get(int(sku), (0, 0, 0))
         cur_e = [ACTION2IDX["page_visit"]]
-        cur_i = [seed_item_idx]
+        cur_c = [list(seed_codes)]   # list of [c0, c1, c2] triples, length T
         cur_d = [0]
 
         events_out: List[dict] = []
@@ -415,15 +460,16 @@ class SessionTransformer(nn.Module):
         current_dt = start_dt
 
         for _ in range(max_steps):
-            e_t = torch.tensor([cur_e], dtype=torch.long, device=device)
-            i_t = torch.tensor([cur_i], dtype=torch.long, device=device)
-            d_t = torch.tensor([cur_d], dtype=torch.long, device=device)
+            e_t = torch.tensor([cur_e], dtype=torch.long, device=device)     # [1, T]
+            c_t = torch.tensor([cur_c], dtype=torch.long, device=device)     # [1, T, 3]
+            d_t = torch.tensor([cur_d], dtype=torch.long, device=device)     # [1, T]
 
             T   = e_t.size(1)
             pos = torch.arange(T, device=device).unsqueeze(0)
+            item_repr = sum(self.code_embs[k](c_t[:, :, k]) for k in range(self.n_code_levels))
             x   = (
                 self.event_emb(e_t)
-                + self.item_emb(i_t)
+                + item_repr
                 + self.delta_emb(d_t)
                 + self.pos_emb(pos)
             )
@@ -440,32 +486,42 @@ class SessionTransformer(nn.Module):
             if a_idx == EOS_IDX:
                 break
 
-            # Item (item-bearing actions only)
             a_t = torch.tensor([a_idx], dtype=torch.long, device=device)
+
+            # Item: sequential N_CODE_LEVELS 128-way samplings
             if a_idx in ITEM_BEARING_IDX:
-                i_logits = self.item_head(h_t, a_t) / temperature
-                k        = min(self.item_head.top_k, self.vocab_size)
-                topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)
-                i_probs  = F.softmax(topk_v, dim=-1)
-                chosen   = int(torch.multinomial(i_probs, 1).item())
-                i_idx    = int(topk_ids[0, chosen].item())
+                sampled_codes = []
+                gold_embs = []   # grows with each level: [1, d_model] tensors
+                for k, head in enumerate(self.item_head.heads):
+                    inp    = torch.cat([h_t] + gold_embs, dim=-1)   # [1, d*(1+k)]
+                    logits = head(inp) / temperature
+                    c_k    = torch.multinomial(F.softmax(logits, dim=-1), 1)  # [1, 1]
+                    gold_embs.append(self.code_embs[k](c_k.squeeze(1)))       # [1, d]
+                    sampled_codes.append(int(c_k.item()))
+                item_code_triple = tuple(sampled_codes)
+                bucket           = codes2sku.get(item_code_triple, None)
+                if bucket is None:
+                    sku_out = None
+                else:
+                    sku_arr, prob_arr = bucket
+                    if len(sku_arr) == 1:
+                        sku_out = int(sku_arr[0])
+                    else:
+                        sku_out = int(np.random.choice(sku_arr, p=prob_arr))
+                i_emb_t          = sum(gold_embs)   # [1, d_model]
             else:
-                i_idx = 0   # padding for non-item-bearing events
+                item_code_triple = (0, 0, 0)
+                sku_out = None
+                zero_c = torch.zeros(1, dtype=torch.long, device=device)
+                i_emb_t = sum(self.code_embs[k](zero_c) for k in range(self.n_code_levels))
 
             # Temporal bin ->seconds
-            i_t_s      = torch.tensor([i_idx], dtype=torch.long, device=device)
-            i_emb_t    = self.item_emb(i_t_s)                           # [1, d_model]
-            d_logits   = self.temporal_head(h_t, a_t, i_emb_t) / temperature
+            d_logits = self.temporal_head(h_t, a_t, i_emb_t) / temperature
             d_probs  = F.softmax(d_logits, dim=-1)
             bin_idx  = int(torch.multinomial(d_probs, 1).item())
             delta_s  = bin_to_seconds(bin_idx)
 
             current_dt = current_dt + pd.Timedelta(seconds=delta_s)
-            # Decode item index ->raw SKU via idx2sku (inverse of sku2idx mapping)
-            if i_idx > 0:
-                sku_out = idx2sku.get(i_idx, i_idx - 1) if idx2sku else i_idx - 1
-            else:
-                sku_out = None
 
             events_out.append({
                 "client_id":  client_id,
@@ -475,13 +531,13 @@ class SessionTransformer(nn.Module):
             })
 
             cur_e.append(a_idx)
-            cur_i.append(i_idx)
+            cur_c.append(list(item_code_triple))
             cur_d.append(bin_idx)
             last_action_idx = a_idx
 
         return events_out
 
-    # Batched autoregressive inference, dont ask me how this works, I don't know either
+    # Batched autoregressive inference
 
     @torch.no_grad()
     def infer_batch(
@@ -505,12 +561,12 @@ class SessionTransformer(nn.Module):
         List[List[dict]] -one event-dict list per input
         """
         self.eval()
-        device  = next(self.parameters()).device
-        B       = len(batch_inputs)
-        sku2idx = getattr(self, "_sku2idx", {})
-        idx2sku = getattr(self, "_idx2sku", {})
+        device    = next(self.parameters()).device
+        B         = len(batch_inputs)
+        sku2codes = getattr(self, "_sku2codes", {})
+        codes2sku = getattr(self, "_codes2sku", {})
 
-        # Per-session history ->memory [B, 1, d_model] This fucking sucks
+        # Per-session history ->memory [B, 1, d_model]
         memories = []
         for _, _, _, history in batch_inputs:
             if history:
@@ -522,19 +578,19 @@ class SessionTransformer(nn.Module):
         memory = torch.cat(memories, dim=0)  # [B, 1, d_model]
 
         # Seed tokens
-        seed_items = [
-            sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
+        seed_code_list = [
+            list(sku2codes.get(int(sku), (0, 0, 0)))
             for _, sku, _, _ in batch_inputs
         ]
         cur_e = torch.tensor([[ACTION2IDX["page_visit"]] for _ in range(B)],
-                             dtype=torch.long, device=device)   # [B, 1]
-        cur_i = torch.tensor([[s] for s in seed_items],
-                             dtype=torch.long, device=device)   # [B, 1]
+                             dtype=torch.long, device=device)       # [B, 1]
+        cur_c = torch.tensor([[s] for s in seed_code_list],
+                             dtype=torch.long, device=device)       # [B, 1, 3]
         cur_d = torch.zeros(B, 1, dtype=torch.long, device=device)  # [B, 1]
 
         done             = torch.zeros(B, dtype=torch.bool, device=device)
         last_action_idxs = torch.full((B,), -1, dtype=torch.long, device=device)
-        # Ok
+
         events_out  = [[] for _ in range(B)]
         current_dts = []
         for _, _, start_dt, _ in batch_inputs:
@@ -548,9 +604,10 @@ class SessionTransformer(nn.Module):
 
             T   = cur_e.size(1)
             pos = torch.arange(T, device=device).unsqueeze(0)   # [1, T] broadcast
+            item_repr = sum(self.code_embs[k](cur_c[:, :, k]) for k in range(self.n_code_levels))
             x   = (
                 self.event_emb(cur_e)
-                + self.item_emb(cur_i)
+                + item_repr
                 + self.delta_emb(cur_d)
                 + self.pos_emb(pos)
             )  # [B, T, d_model]
@@ -559,7 +616,7 @@ class SessionTransformer(nn.Module):
             h   = self.decoder(x, memory, tgt_mask=tgt_mask)  # [B, T, d_model]
             h_t = h[:, -1, :]                                  # [B, d_model]
 
-            #  Action
+            # Action
             a_logits = self.action_head.fc(h_t) / temperature  # [B, N_ACTIONS]
             a_logits = self.action_head.constraint_mask.apply_batch(a_logits, last_action_idxs)
             a_probs  = F.softmax(a_logits, dim=-1)
@@ -573,20 +630,29 @@ class SessionTransformer(nn.Module):
                 is_item |= (a_idxs == idx)
             is_item &= ~done
 
-            i_idxs = torch.zeros(B, dtype=torch.long, device=device)
+            # Default codes (0,0,0) for non-item events
+            i_code_triples = torch.zeros(B, self.n_code_levels, dtype=torch.long, device=device)
+
             if is_item.any():
-                h_item   = h_t[is_item]       # [M, d_model]
-                a_item   = a_idxs[is_item]    # [M]
-                i_logits = self.item_head(h_item, a_item) / temperature  # [M, vocab_size]
-                k        = min(self.item_head.top_k, self.vocab_size)
-                topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)      # [M, k]
-                i_probs  = F.softmax(topk_v, dim=-1)
-                chosen   = torch.multinomial(i_probs, 1).squeeze(1)     # [M]
-                i_idxs[is_item] = topk_ids.gather(1, chosen.unsqueeze(1)).squeeze(1)
-            # This is bad but works for now
+                h_item = h_t[is_item]   # [M, d_model]
+                M      = h_item.size(0)
+                sampled_codes_m = torch.zeros(M, self.n_code_levels, dtype=torch.long, device=device)
+                gold_embs = []
+                for k, head in enumerate(self.item_head.heads):
+                    inp    = torch.cat([h_item] + gold_embs, dim=-1)   # [M, d*(1+k)]
+                    logits = head(inp) / temperature                   # [M, K]
+                    c_k    = torch.multinomial(F.softmax(logits, dim=-1), 1).squeeze(1)  # [M]
+                    gold_embs.append(self.code_embs[k](c_k))           # [M, d]
+                    sampled_codes_m[:, k] = c_k
+                i_code_triples[is_item] = sampled_codes_m
+
+            # Item embedding for temporal head (recomputed from final code triples)
+            i_embs = sum(
+                self.code_embs[k](i_code_triples[:, k]) for k in range(self.n_code_levels)
+            )  # [B, d_model]
+
             # Temporal
-            i_emb_t  = self.item_emb(i_idxs)  # [B, d_model]
-            d_logits = self.temporal_head(h_t, a_idxs, i_emb_t) / temperature
+            d_logits = self.temporal_head(h_t, a_idxs, i_embs) / temperature
             d_probs  = F.softmax(d_logits, dim=-1)
             bin_idxs = torch.multinomial(d_probs, 1).squeeze(1)  # [B]
 
@@ -595,12 +661,18 @@ class SessionTransformer(nn.Module):
                 if done[b] or a_idxs[b] == EOS_IDX:
                     continue
                 a_idx   = int(a_idxs[b].item())
-                i_idx   = int(i_idxs[b].item())
                 bin_idx = int(bin_idxs[b].item())
                 current_dts[b] = current_dts[b] + pd.Timedelta(seconds=bin_to_seconds(bin_idx))
                 sku_out = None
-                if i_idx > 0:
-                    sku_out = idx2sku.get(i_idx, i_idx - 1) if idx2sku else i_idx - 1
+                if is_item[b]:
+                    triple = tuple(i_code_triples[b].tolist())
+                    bucket = codes2sku.get(triple, None)
+                    if bucket is not None:
+                        sku_arr, prob_arr = bucket
+                        if len(sku_arr) == 1:
+                            sku_out = int(sku_arr[0])
+                        else:
+                            sku_out = int(np.random.choice(sku_arr, p=prob_arr))
                 events_out[b].append({
                     "client_id":  batch_inputs[b][0],
                     "event_type": IDX2ACTION[a_idx],
@@ -608,10 +680,9 @@ class SessionTransformer(nn.Module):
                     "timestamp":  current_dts[b],
                 })
 
-            # Grow sequence tensors (all sessions, incl. done -keeps shape uniform)
-            # poor implementation that needs to get fixed as well, 
+            # Grow sequence tensors (all sessions incl. done -keeps shape uniform)
             cur_e = torch.cat([cur_e, a_idxs.unsqueeze(1)], dim=1)
-            cur_i = torch.cat([cur_i, i_idxs.unsqueeze(1)], dim=1)
+            cur_c = torch.cat([cur_c, i_code_triples.unsqueeze(1)], dim=1)
             cur_d = torch.cat([cur_d, bin_idxs.unsqueeze(1)], dim=1)
 
             last_action_idxs = torch.where(done, last_action_idxs, a_idxs)
@@ -627,7 +698,8 @@ class SessionTransformer(nn.Module):
         torch.save({
             "state_dict": self.state_dict(),
             "config": {
-                "vocab_size":      self.vocab_size,
+                "codebook_size":   self.codebook_size,
+                "n_code_levels":   self.n_code_levels,
                 "d_model":         self.d_model,
                 "n_actions":       self.action_head.fc.out_features,
                 "n_layers":        len(self.decoder.layers),
@@ -649,7 +721,8 @@ class SessionTransformer(nn.Module):
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         cfg        = checkpoint["config"]
         model      = cls(
-            vocab_size        = cfg["vocab_size"],
+            codebook_size     = cfg["codebook_size"],
+            n_code_levels     = cfg["n_code_levels"],
             d_model           = cfg["d_model"],
             n_actions         = cfg["n_actions"],
             n_layers          = cfg["n_layers"],
@@ -661,7 +734,7 @@ class SessionTransformer(nn.Module):
         model.load_state_dict(checkpoint["state_dict"])
         model.to(device)
         model.eval()
-        print(f"  SessionTransformer loaded ← {path}")
+        print(f"  SessionTransformer loaded <- {path}")
         return model
 
     # Private helpers
@@ -676,23 +749,26 @@ class SessionTransformer(nn.Module):
         Produce cross-attention memory from history tensors (training) or
         a zero dummy tensor when history is None.
 
-        history : dict with keys 'events', 'items', 'deltas' ->[B, H] tensors
+        history : dict with keys 'events', 'codes' [B,H,N_LEVELS], 'deltas' ->[B, H]
         Returns : [B, 1, d_model]
         """
         if history is None:
             return torch.zeros(batch_size, 1, self.d_model, device=device)
 
         h_e  = history["events"].to(device)   # [B, H]
-        h_i  = history["items"].to(device)
-        h_d  = history["deltas"].to(device)
+        h_c  = history["codes"].to(device)    # [B, H, N_LEVELS]
+        h_d  = history["deltas"].to(device)   # [B, H]
         h_pad = history.get("padding_mask")
         if h_pad is not None:
             h_pad = h_pad.to(device)
         H   = h_e.size(1)
         pos = torch.arange(H, device=device).unsqueeze(0)
+        hist_item_repr = sum(
+            self.code_embs[k](h_c[:, :, k]) for k in range(self.n_code_levels)
+        )
         hist_emb = (
             self.event_emb(h_e)
-            + self.item_emb(h_i)
+            + hist_item_repr
             + self.delta_emb(h_d)
             + self.pos_emb(pos)
         )  # [B, H, d_model]
@@ -709,18 +785,18 @@ class SessionTransformer(nn.Module):
 
         Returns [1, H, d_model].
         """
-        history  = history[-self.history.window_H :]
-        sku2idx  = getattr(self, "_sku2idx", {})
-        h_e, h_i, h_d = [], [], []
+        history   = history[-self.history.window_H :]
+        sku2codes = getattr(self, "_sku2codes", {})
+        h_e, h_c, h_d = [], [], []
         prev_ts = None
         for ev in history:
             a_str = ev.get("event_type", "page_visit")
             h_e.append(ACTION2IDX.get(a_str, 0))
             sku = ev.get("sku")
             if sku is not None:
-                h_i.append(sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size))
+                h_c.append(list(sku2codes.get(int(sku), (0, 0, 0))))
             else:
-                h_i.append(0)
+                h_c.append([0, 0, 0])
             ts = ev.get("timestamp")
             if ts is not None and prev_ts is not None:
                 delta_s = (pd.Timestamp(ts) - pd.Timestamp(prev_ts)).total_seconds()
@@ -731,12 +807,15 @@ class SessionTransformer(nn.Module):
 
         H   = len(h_e)
         pos = torch.arange(H, device=device).unsqueeze(0)
-        e_t = torch.tensor([h_e], dtype=torch.long, device=device)
-        i_t = torch.tensor([h_i], dtype=torch.long, device=device)
-        d_t = torch.tensor([h_d], dtype=torch.long, device=device)
+        e_t = torch.tensor([h_e], dtype=torch.long, device=device)   # [1, H]
+        c_t = torch.tensor([h_c], dtype=torch.long, device=device)   # [1, H, 3]
+        d_t = torch.tensor([h_d], dtype=torch.long, device=device)   # [1, H]
+        hist_item_repr = sum(
+            self.code_embs[k](c_t[:, :, k]) for k in range(self.n_code_levels)
+        )
         return (
             self.event_emb(e_t)
-            + self.item_emb(i_t)
+            + hist_item_repr
             + self.delta_emb(d_t)
             + self.pos_emb(pos)
         )  # [1, H, d_model]

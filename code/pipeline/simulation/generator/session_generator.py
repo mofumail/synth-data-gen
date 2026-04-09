@@ -24,7 +24,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from config import DS_START, HISTORY_WINDOW, VOCAB_K
+from config import DS_START, HISTORY_WINDOW, VOCAB_K, INFER_TEMPERATURE
 from simulation.validity import ValidityLayer
 from simulation.generator.session_transformer import SessionTransformer
 
@@ -50,6 +50,7 @@ class SessionGenerator:
         identity_sampler_path: Optional[str] = None,
         device: str = "cpu",
         batch_size: int = 256,
+        temperature: float = INFER_TEMPERATURE,
     ):
         self.model_path            = str(model_path)
         self.validity_layer        = validity_layer
@@ -57,6 +58,7 @@ class SessionGenerator:
         self.identity_sampler_path = identity_sampler_path
         self.device                = device
         self.batch_size            = batch_size
+        self.temperature           = temperature
         self._model                = None    # loaded lazily
         self._sampler              = None    # loaded lazily
         # Accumulates generated sessions per user across generate() calls.
@@ -72,15 +74,15 @@ class SessionGenerator:
             valid_transitions=self.valid_transitions,
             device=self.device,
         )
-        # Attach sku2idx / idx2sku for correct item encoding/decoding in infer()
+        # Attach sku2codes / codes2sku for RQ-VAE item encoding/decoding in infer()
         try:
             import joblib
-            from ingestion.dataset import SKU2IDX_PATH
-            sku2idx = joblib.load(SKU2IDX_PATH)
-            self._model._sku2idx = sku2idx
-            self._model._idx2sku = {v: k for k, v in sku2idx.items()}
+            from config import SKU2CODES_PATH
+            sku2codes, codes2sku = joblib.load(SKU2CODES_PATH)
+            self._model._sku2codes = sku2codes
+            self._model._codes2sku = codes2sku
         except Exception:
-            pass   # fall back to sku+1 offset if mapping not found
+            pass   # infer() will fall back to (0,0,0) codes if mapping not found
 
     def _load_sampler(self) -> None:
         """Optionally load IdentityFactory for generate()."""
@@ -98,7 +100,7 @@ class SessionGenerator:
         start_dt,
         history: Optional[List[dict]] = None,
         max_steps: int = 50,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
         apply_constraints: bool = True,
     ) -> List[dict]:
         """
@@ -129,7 +131,7 @@ class SessionGenerator:
             start_dt=start_dt,
             history=history,
             max_steps=max_steps,
-            temperature=temperature,
+            temperature=temperature if temperature is not None else self.temperature,
         )
 
         if apply_constraints and events:
@@ -178,13 +180,18 @@ class SessionGenerator:
         start_base = pd.Timestamp(DS_START)
         window_s   = 30 * 24 * 3600
 
+        # Pre-sample all identities in one CTGAN call (avoids n_sessions individual calls)
+        if self._sampler is not None:
+            identities = self._sampler.generate_identities(n_sessions)
+        else:
+            identities = None
+
         # Build all (client_id, sku, start_dt, history) inputs up front
         batch_inputs: List[tuple] = []
-        for _ in range(n_sessions):
-            if self._sampler is not None:
-                identity = self._sampler.generate_identity()
-                cid      = identity["client_id"]
-                item     = identity["sku"]
+        for i in range(n_sessions):
+            if identities is not None:
+                cid  = identities[i]["client_id"]
+                item = identities[i]["sku"]
             else:
                 cid  = int(rng_np.integers(1, 10_000_000))
                 item = int(rng_np.integers(0, VOCAB_K))
@@ -200,7 +207,7 @@ class SessionGenerator:
         n_batches = (n_sessions + self.batch_size - 1) // self.batch_size
         for start in tqdm(range(0, n_sessions, self.batch_size), total=n_batches, desc="  Transformer gen", unit="batch", leave=False, file=__import__("sys").stdout):
             chunk   = batch_inputs[start : start + self.batch_size]
-            results = self._model.infer_batch(chunk)
+            results = self._model.infer_batch(chunk, temperature=self.temperature)
             if apply_constraints:
                 results = [
                     s if (s and self.validity_layer.validate(s)) else []

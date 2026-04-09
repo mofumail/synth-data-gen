@@ -1,0 +1,61 @@
+===============================================================
+ PIPELINE ROADMAP
+===============================================================
+
+--- CURRENT (Iteration 2 — RQ-VAE with tabular features) ---
+
+[x] RQ-VAE trained (3 levels, K=128, tabular features: category+price+name_bytes)
+    - 14k unique code triples from 1.5M SKUs (residual collapse — expected given flat feature space)
+    - codes are category-coherent (good enough for baseline)
+
+[ ] Train SessionTransformer overnight (d256, 6 layers, 8 heads, 30 epochs)
+    PYTHONPATH=. uv run python train.py
+
+[ ] Run evaluation on trained model
+    PYTHONPATH=. uv run python evaluate.py --n-sessions 500 --num-seeds 1
+    - Check: item distribution (Gini, coverage), TSTR-T, action/temporal fidelity
+    - Run behavioral purity check on RQ-VAE codes (see notes below)
+
+[ ] Behavioral purity check (run alongside eval):
+    - For each code triple, measure category purity (fraction of items from majority category)
+    - If mean purity > 0.8 -> codes are semantically coherent, framing holds
+    - If purity < 0.8 -> codes are noise, motivates Plan C even more strongly
+
+
+--- NEXT (Iteration 3 — behavior-based item embeddings) ---
+
+[ ] Plan C: replace tabular features with item2vec embeddings
+
+    Motivation: RQ-VAE needs rich continuous geometry. Tabular features
+    (category/price/name) are too flat. Collaborative filtering embeddings
+    capture what items are bought/viewed together — actual semantic structure.
+
+    Implementation:
+    1. Train item2vec (Word2Vec skip-gram via gensim) on session sequences
+       from training data. Treat each session as a sentence of SKU IDs.
+       Output: 64-dim embedding per SKU.
+
+    2. Replace ItemFeatureEncoder in ingestion/rqvae.py with a simple
+       Linear(64, latent_dim) that takes item2vec embeddings as input.
+
+    3. Re-run: python train.py --rebuild
+       Expect: much higher unique triple count (approaching 128^3 coverage),
+       lower collision rate, better item diversity in generated sessions.
+
+    Thesis framing:
+    "Items are represented by behavior-derived semantic IDs capturing
+     co-purchase similarity, obtained by applying RQ-VAE to item2vec
+     embeddings trained on real session sequences."
+
+    References: item2vec (Barkan & Koenigstein, 2016), TIGER (Rajput et al.,
+    NeurIPS 2023), MBGen (WWW 2024)
+
+
+--- NOTES ---
+
+- iter1 branch preserves old pipeline (raw 630k-way softmax item head)
+- Codebook collapse fix (dead-entry restart) is implemented but not the
+  root cause — root cause is flat feature space, not training instability
+- RQ-VAE improvements already in place: k-means init, ReduceLROnPlateau,
+  early stopping (patience=15), dead-entry restart
+- train.py --rebuild deletes RQ-VAE + CTGAN artifacts and rebuilds from scratch

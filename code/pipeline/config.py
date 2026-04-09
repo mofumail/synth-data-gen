@@ -27,8 +27,13 @@ SESSION_TIMEOUT_MIN = _cfg["session_timeout_min"]
 TEMPORAL_MAX_S      = SESSION_TIMEOUT_MIN * 60   # derived: max intra-session delta (seconds)
 HISTORY_WINDOW      = _cfg["history_window"]
 
-#Vocabulary
-VOCAB_K = _cfg["vocab_k"]
+#Vocabulary — derived from sku2codes catalog after rqvae.py runs; falls back to config.yaml
+_catalog_size_path = OUTPUT_DIR / "catalog_size.txt"
+VOCAB_K = (
+    int(_catalog_size_path.read_text().strip())
+    if _catalog_size_path.exists()
+    else _cfg["vocab_k"]
+)
 
 #Temporal head
 N_TEMPORAL_BINS = _cfg["n_temporal_bins"]
@@ -62,7 +67,30 @@ TRAIN_NUM_WORKERS  = _cfg.get("train_num_workers", 4)
 # Derived: unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}"
+# RQ-VAE item tokeniser
+SKU2CODES_PATH   = OUTPUT_DIR / "sku2codes.joblib"
+RQVAE_MODEL_PATH = MODEL_DIR  / "item_rqvae.pt"
+
+RQVAE_CODEBOOK_SIZE = _cfg["rqvae_codebook_size"]
+RQVAE_N_LEVELS      = _cfg["rqvae_n_levels"]
+RQVAE_LATENT_DIM    = _cfg["rqvae_latent_dim"]
+RQVAE_EPOCHS        = _cfg["rqvae_epochs"]
+RQVAE_LR            = _cfg["rqvae_lr"]
+RQVAE_BATCH_SIZE    = _cfg["rqvae_batch_size"]
+
+# item2vec
+ITEM2VEC_PATH      = OUTPUT_DIR / "item2vec_embeddings.joblib"
+ITEM2VEC_DIM       = _cfg.get("item2vec_dim",       64)
+ITEM2VEC_EPOCHS    = _cfg.get("item2vec_epochs",    10)
+ITEM2VEC_WINDOW    = _cfg.get("item2vec_window",     5)
+ITEM2VEC_MIN_COUNT = _cfg.get("item2vec_min_count",  2)
+
+# Long-tail diversity knobs
+INFER_TEMPERATURE    = _cfg.get("infer_temperature",    1.2)
+ITEM_LOSS_ALPHA      = _cfg.get("item_loss_alpha",      0.5)
+ITEM_LABEL_SMOOTHING = _cfg.get("item_label_smoothing", 0.1)
+
+MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_rqvae"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/  -one folder per variant
 
 #Evaluation model (independent of training config)

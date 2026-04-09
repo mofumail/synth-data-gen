@@ -11,7 +11,7 @@ session_timeout_min: 30        # inactivity gap (minutes) that starts a new sess
 history_window:      16        # max past events used as cross-session context (covers 93.9% of users)
 
 # Vocabulary
-vocab_k: 630052                # top-K SKUs covering ~90% of training item events
+vocab_k: 1534050               # fallback catalog size used before rqvae.py has run; overridden by output/catalog_size.txt once sku2codes is built
 
 # Temporal head
 n_temporal_bins: 64            # log-spaced bins between temporal_min_s and session_timeout
@@ -29,15 +29,34 @@ train_epochs:       30
 train_batch_size:   128
 train_max_length:   50         # max events per session (including EOS)
 train_lr:           0.0003     # AdamW learning rate
-train_d_model:      128        # transformer hidden dimension
-train_n_layers:     4          # number of decoder layers
-train_n_heads:      4          # attention heads (must divide d_model)
+train_d_model:      256        # transformer hidden dimension (scaled up: RQ-VAE removes 160M param item bottleneck)
+train_n_layers:     6          # number of decoder layers (MBGen/GAMER scale)
+train_n_heads:      8          # attention heads (must divide d_model; 256/8 = 32 per head)
 train_max_sessions: null       # null = use all sessions; set int for smoke tests
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
 
 # Evaluation
-eval_model: session_transformer_d128_l4   # model subdir to load for evaluate.py
-                                          # change this to switch which checkpoint gets evaluated
+eval_model: session_transformer_d256_l6_h8_rqvae   # model subdir to load for evaluate.py
+                                                   # change this to switch which checkpoint gets evaluated
+
+# RQ-VAE item tokeniser
+rqvae_codebook_size: 128      # K per level (128^3 = 2.1M combos > 1.5M SKUs)
+rqvae_n_levels:      3        # residual quantisation levels
+rqvae_latent_dim:    64       # encoder output / codebook vector dim
+rqvae_epochs:        300      # max epochs; early stopping (patience=15) will terminate sooner
+rqvae_lr:            0.001
+rqvae_batch_size:    4096
+
+# item2vec (Plan C — behavior-based item embeddings fed into RQ-VAE encoder)
+item2vec_dim:       64        # Word2Vec vector size; matches rqvae_latent_dim
+item2vec_epochs:    10        # Word2Vec training passes over session corpus
+item2vec_window:    5         # skip-gram context window (events before/after)
+item2vec_min_count: 2         # ignore SKUs seen fewer than N times in training sessions
+
+# Long-tail diversity (Plan C2 — fix popularity halo in generated sessions)
+infer_temperature:     1.2    # sampling temperature at inference (>1 flattens concentration)
+item_loss_alpha:       0.5    # inverse-freq weight exponent for item CE (0 = off, 0.5 = sqrt-inv-freq)
+item_label_smoothing:  0.1    # label smoothing on item CE (prevents over-confident concentration)
 
 # GRU4Rec downstream evaluator
 gru4rec_embed_dim:   64

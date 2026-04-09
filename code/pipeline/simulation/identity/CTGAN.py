@@ -88,14 +88,19 @@ class IdentityFactory:
         print(f"  IdentityFactory loaded from {path}")
         return True
 
-    def generate_identity(self) -> dict:
+    def generate_identities(self, n: int) -> list:
+        """Sample n (client_id, sku) pairs in one CTGAN call."""
         if not self.is_trained:
             raise RuntimeError("IdentityFactory not fitted. Run fit() first.")
-        row = self._model.sample(1).iloc[0]
-        return {
-            "client_id": int(round(float(row["client_id"]))),
-            "sku":        int(row["sku"]),
-        }
+        df = self._model.sample(n)
+        return [
+            {"client_id": int(round(float(row["client_id"]))), "sku": int(row["sku"])}
+            for _, row in df.iterrows()
+        ]
+
+    def generate_identity(self) -> dict:
+        """Sample a single identity. Prefer generate_identities(n) for bulk use."""
+        return self.generate_identities(1)[0]
 
 
 if __name__ == "__main__":
