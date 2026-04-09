@@ -35,8 +35,13 @@ train_n_heads:      4          # attention heads (must divide d_model)
 train_max_sessions: null       # null = use all sessions; set int for smoke tests
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
 
+# Item-head loss
+train_item_loss:      sampled   # "full" (iter1-style V-way CE) | "sampled" (stratified sampled softmax)
+train_sampled_k:      8192      # number of shared negatives per step for sampled softmax
+train_sampled_alpha:  0.75      # unigram smoothing: Q(w) ∝ U(w)^alpha (word2vec convention)
+
 # Evaluation
-eval_model: session_transformer_d128_l4_h4   # model subdir to load for evaluate.py
+eval_model: session_transformer_d128_l4_h4_ss8192   # model subdir to load for evaluate.py
                                              # change this to switch which checkpoint gets evaluated
 
 # GRU4Rec downstream evaluator

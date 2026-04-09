@@ -46,40 +46,93 @@ def _cache_valid(cache_file: str, parquet_path: str) -> bool:
         return False
     return os.path.getmtime(cache_file) >= os.path.getmtime(parquet_path)
 
-SKU2IDX_PATH = OUTPUT_DIR / "sku2idx.joblib"
+SKU2IDX_PATH     = OUTPUT_DIR / "sku2idx.joblib"
+VOCAB_STATS_PATH = OUTPUT_DIR / "vocab_stats.joblib"
 
 
-def build_sku2idx(df_train_skus: pd.Series) -> dict:
+def build_sku2idx(df_train_skus: pd.Series):
     """
     Map the top-(VOCAB_K-1) most frequent SKUs to indices 1..VOCAB_K-1.
     Index 0 is reserved for padding / unknown items.
+
+    Returns (sku2idx, counts) where counts[idx] is the training-set interaction
+    count of the SKU at that index (counts[0] = 0, padding).
     """
-    top_skus = (
+    counts_series = (
         df_train_skus
         .dropna()
         .astype(int)
         .value_counts()
         .head(VOCAB_K - 1)
-        .index
-        .tolist()
     )
-    return {sku: idx + 1 for idx, sku in enumerate(top_skus)}
+    skus   = counts_series.index.tolist()
+    values = counts_series.values
+
+    sku2idx = {sku: idx + 1 for idx, sku in enumerate(skus)}
+    counts  = np.zeros(VOCAB_K, dtype=np.int64)
+    counts[1:1 + len(values)] = values       # index 0 (padding) stays 0
+    return sku2idx, counts
+
+
+def get_vocab_stats(df_train_skus: pd.Series = None):
+    """Load cached (sku2idx, counts) or build and cache them."""
+    if VOCAB_STATS_PATH.exists():
+        d = joblib.load(VOCAB_STATS_PATH)
+        return d["sku2idx"], d["counts"]
+    if df_train_skus is None:
+        raise RuntimeError(
+            f"vocab_stats not found at {VOCAB_STATS_PATH}. "
+            "Pass df_train_skus to build it."
+        )
+    sku2idx, counts = build_sku2idx(df_train_skus)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump({"sku2idx": sku2idx, "counts": counts}, VOCAB_STATS_PATH)
+    joblib.dump(sku2idx, SKU2IDX_PATH)   # legacy cache for backward compat
+    print(
+        f"  vocab_stats saved -> {VOCAB_STATS_PATH}  "
+        f"({len(sku2idx):,} SKUs, counts sum={int(counts.sum()):,})"
+    )
+    return sku2idx, counts
 
 
 def get_sku2idx(df_train_skus: pd.Series = None) -> dict:
-    """Load cached sku2idx or build and cache it."""
+    """Load cached sku2idx or build and cache it (backward-compat wrapper)."""
     if SKU2IDX_PATH.exists():
         return joblib.load(SKU2IDX_PATH)
-    if df_train_skus is None:
-        raise RuntimeError(
-            f"sku2idx not found at {SKU2IDX_PATH}. "
-            "Pass df_train_skus to build it."
-        )
-    mapping = build_sku2idx(df_train_skus)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    joblib.dump(mapping, SKU2IDX_PATH)
-    print(f"  sku2idx saved -> {SKU2IDX_PATH}  ({len(mapping):,} SKUs)")
-    return mapping
+    sku2idx, _ = get_vocab_stats(df_train_skus)
+    return sku2idx
+
+
+def ensure_vocab_stats() -> np.ndarray:
+    """
+    Ensure VOCAB_STATS_PATH exists and return the counts array.
+
+    Fast path: if vocab_stats.joblib exists, load and return counts.
+    Slow path: read the training parquet (with the same train-split filter as
+    SessionDataset), compute counts, persist, return. Used by train.py when
+    running with sampled softmax and the stats cache is missing (legacy
+    sku2idx-only checkpoints).
+    """
+    if VOCAB_STATS_PATH.exists():
+        return joblib.load(VOCAB_STATS_PATH)["counts"]
+
+    print(f"  vocab_stats not found at {VOCAB_STATS_PATH}. "
+          f"Rebuilding from {CLEAN_PARQUET} (one-time, ~1-2 min)...")
+    df = pl.read_parquet(
+        str(CLEAN_PARQUET),
+        columns=["timestamp", "session_id", "sku"],
+    )
+    train_cut = pd.Timestamp(TRAIN_CUTOFF)
+    session_starts = df.group_by("session_id").agg(
+        pl.col("timestamp").min().alias("session_start")
+    )
+    df = (
+        df.join(session_starts, on="session_id")
+          .filter(pl.col("session_start") < train_cut)
+    )
+    skus = df.select("sku").to_series().to_pandas()
+    _, counts = get_vocab_stats(skus)
+    return counts
 
 
 class SessionDataset(Dataset):

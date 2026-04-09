@@ -32,8 +32,9 @@ from config import (
     TRAIN_EPOCHS, TRAIN_BATCH_SIZE, TRAIN_MAX_LENGTH,
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
     TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
+    TRAIN_ITEM_LOSS, TRAIN_SAMPLED_K, TRAIN_SAMPLED_ALPHA,
 )
-from ingestion.dataset import InteractionGenerator
+from ingestion.dataset import InteractionGenerator, ensure_vocab_stats
 from simulation.generator.session_transformer import (
     SessionTransformer,
     N_ACTIONS,
@@ -57,6 +58,9 @@ def train():
     print(f"Config: epochs={TRAIN_EPOCHS}, batch={TRAIN_BATCH_SIZE}, "
           f"d_model={TRAIN_D_MODEL}, layers={TRAIN_N_LAYERS}, heads={TRAIN_N_HEADS}, "
           f"lr={TRAIN_LR}, max_sessions={TRAIN_MAX_SESSIONS}")
+    print(f"Item loss: {TRAIN_ITEM_LOSS}"
+          + (f" (K={TRAIN_SAMPLED_K}, alpha={TRAIN_SAMPLED_ALPHA})"
+             if TRAIN_ITEM_LOSS == "sampled" else ""))
 
     run = wandb.init(
         project="thesis-session-transformer",
@@ -74,6 +78,9 @@ def train():
             "n_temporal_bins": N_TEMPORAL_BINS,
             "history_window":  HISTORY_WINDOW,
             "max_sessions":    TRAIN_MAX_SESSIONS,
+            "item_loss":       TRAIN_ITEM_LOSS,
+            "sampled_k":       TRAIN_SAMPLED_K,
+            "sampled_alpha":   TRAIN_SAMPLED_ALPHA,
         },
     )
 
@@ -113,10 +120,29 @@ def train():
         window_H=HISTORY_WINDOW,
         valid_transitions={},     # mask not used during training
     ).to(device)
+    # Capture the uncompiled item_head BEFORE torch.compile so sampled_logits()
+    # reaches the real module rather than going through the OptimizedModule wrapper.
+    item_head = model.item_head
     model = torch.compile(model)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {n_params:,}")
+
+    # Sampled-softmax sampler: α-smoothed unigram proposal Q(w) ∝ U(w)^alpha.
+    # Built once at train start, held as train-loop locals (not registered buffers,
+    # so they don't leak into checkpoints or the inference path).
+    if TRAIN_ITEM_LOSS == "sampled":
+        counts_np = ensure_vocab_stats()                       # [V] int64
+        counts = torch.from_numpy(counts_np).to(device)
+        probs  = counts.double().pow(TRAIN_SAMPLED_ALPHA)
+        probs[0] = 0.0                                         # padding: never drawn
+        probs  = (probs / probs.sum()).float()                 # [V] fp32, ~2.5 MB
+        log_q  = torch.log(probs.clamp_min(1e-30))             # [V] fp32
+        nonzero = int((probs > 0).sum().item())
+        print(f"  Sampled softmax: V={counts.numel():,}, "
+              f"active={nonzero:,}, K={TRAIN_SAMPLED_K}, alpha={TRAIN_SAMPLED_ALPHA}")
+    else:
+        probs = log_q = None
 
     optimizer = AdamW(model.parameters(), lr=TRAIN_LR, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=TRAIN_EPOCHS * len(gen), eta_min=1e-6)
@@ -160,27 +186,46 @@ def train():
                 tgt_is_item |= (tgt_actions == idx)
             item_valid = valid & tgt_is_item  # [B, T-1]
 
-            # Forward (teacher-forced); item_logits are sparse [M, vocab_size]
+            # Forward (teacher-forced). In "ctx" mode item_logits is None and
+            # item_ctx is (h_item, tgt_e_item) for the sampled-softmax path.
+            _fwd_mode = "ctx" if TRAIN_ITEM_LOSS == "sampled" else "full"
             with autocast("cuda"):
-                action_logits, item_logits, temporal_logits = model(
+                action_logits, item_logits, temporal_logits, item_ctx = model(
                     events, items, deltas,
                     history=history,
                     tgt_key_padding_mask=pad_mask,
                     item_mask=item_valid,
+                    item_head_mode=_fwd_mode,
                 )
                 # action_logits:   [B, T-1, n_actions]
-                # item_logits:     [M, vocab_size]   M = item_valid.sum()
+                # item_logits:     [M, vocab_size] if "full", else None
                 # temporal_logits: [B, T-1, n_bins]
+                # item_ctx:        (h_item, tgt_e_item) if "ctx", else None
 
                 # Action loss
                 a_logits = action_logits[valid]          # [N, N_ACTIONS]
                 a_tgt    = tgt_actions[valid]            # [N]
                 action_loss = F.cross_entropy(a_logits, a_tgt)
 
-                # Item loss (sparse logits already at item positions)
+                # Item loss: full softmax or stratified sampled softmax
                 if item_valid.any():
-                    i_tgt     = tgt_items[item_valid]    # [M]
-                    item_loss = F.cross_entropy(item_logits, i_tgt)
+                    i_tgt = tgt_items[item_valid]        # [M]
+                    if TRAIN_ITEM_LOSS == "sampled":
+                        h_item, tgt_e_item = item_ctx
+                        # Shared negatives per step: O(K) vs O(M*K) with negligible
+                        # statistical penalty because distinct h_t's stratify the noise.
+                        neg_ids = torch.multinomial(
+                            probs, TRAIN_SAMPLED_K, replacement=True
+                        )                                 # [K]
+                        sampled = item_head.sampled_logits(
+                            h_item, tgt_e_item, i_tgt, neg_ids, log_q
+                        )                                 # [M, 1+K]
+                        zeros = torch.zeros(
+                            sampled.size(0), dtype=torch.long, device=device
+                        )
+                        item_loss = F.cross_entropy(sampled, zeros)
+                    else:
+                        item_loss = F.cross_entropy(item_logits, i_tgt)
                 else:
                     item_loss = torch.zeros(1, device=device).squeeze()
 
@@ -265,11 +310,14 @@ def train():
                 item_valid = valid & tgt_is_item
 
                 with autocast("cuda"):
-                    action_logits, item_logits, temporal_logits = model(
+                    # Val always uses full CE for apples-to-apples comparison
+                    # against iter1, regardless of TRAIN_ITEM_LOSS.
+                    action_logits, item_logits, temporal_logits, _ = model(
                         events, items, deltas,
                         history=history,
                         tgt_key_padding_mask=pad_mask,
                         item_mask=item_valid,
+                        item_head_mode="full",
                     )
                     a_logits = action_logits[valid]
                     val_action_loss = F.cross_entropy(a_logits, tgt_actions[valid])

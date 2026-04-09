@@ -59,10 +59,16 @@ TRAIN_N_HEADS      = _cfg["train_n_heads"]
 TRAIN_MAX_SESSIONS = _cfg["train_max_sessions"]   # None = full dataset
 TRAIN_NUM_WORKERS  = _cfg.get("train_num_workers", 4)
 
+#Item-head loss
+TRAIN_ITEM_LOSS     = _cfg.get("train_item_loss",     "full")    # "full" | "sampled"
+TRAIN_SAMPLED_K     = _cfg.get("train_sampled_k",     8192)
+TRAIN_SAMPLED_ALPHA = _cfg.get("train_sampled_alpha", 0.75)
+
 # Derived: unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}"
+_LOSS_TAG = "" if TRAIN_ITEM_LOSS == "full" else f"_ss{TRAIN_SAMPLED_K}"
+MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}{_LOSS_TAG}"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/  -one folder per variant
 
 #Evaluation model (independent of training config)

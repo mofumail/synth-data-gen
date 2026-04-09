@@ -54,6 +54,8 @@ class SeedResult:
     fidelity_val:   FidelityResult        # transformer synthetic vs val distribution
     fidelity_markov_train: FidelityResult # markov baseline vs training distribution
     fidelity_markov_val:   FidelityResult # markov baseline vs val distribution
+    fidelity_trtr_train: FidelityResult   # real train sample vs training distribution
+    fidelity_trtr_val:   FidelityResult   # real train sample vs val distribution
     validity_pre: ValidityResult          # before ValidityLayer
     validity_post: ValidityResult         # after ValidityLayer
     utility: List[UtilityResult]          # one per condition: TSTR-T, TSTR-M, TRTR
@@ -76,6 +78,10 @@ class AggregatedResult:
     fidelity_markov_train_std:  FidelityResult
     fidelity_markov_val_mean:   FidelityResult # markov baseline vs val distribution
     fidelity_markov_val_std:    FidelityResult
+    fidelity_trtr_train_mean:   FidelityResult # real train sample vs training distribution
+    fidelity_trtr_train_std:    FidelityResult
+    fidelity_trtr_val_mean:     FidelityResult # real train sample vs val distribution
+    fidelity_trtr_val_std:      FidelityResult
     validity_pre_mean: ValidityResult
     validity_pre_std: ValidityResult
     validity_post_mean: ValidityResult

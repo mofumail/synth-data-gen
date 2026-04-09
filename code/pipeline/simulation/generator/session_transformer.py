@@ -56,14 +56,14 @@ def seconds_to_bin(secs: float) -> int:
     return min(int(np.searchsorted(BIN_EDGES[1:], secs)), N_TEMPORAL_BINS - 1)
 
 
-# Precomputed lookup: avoids np.sqrt on every generated event
-BIN_SECONDS_LUT: List[float] = [bin_to_seconds(i) for i in range(N_TEMPORAL_BINS)]
-
-
 def bin_to_seconds(bin_idx: int) -> float:
     lo = BIN_EDGES[bin_idx]
     hi = BIN_EDGES[min(bin_idx + 1, N_TEMPORAL_BINS)]
     return float(np.sqrt(lo * hi))   # geometric midpoint
+
+
+# Precomputed lookup: avoids np.sqrt on every generated event
+BIN_SECONDS_LUT: List[float] = [bin_to_seconds(i) for i in range(N_TEMPORAL_BINS)]
 
 
 # TransitionConstraintMask, this should be removed and maybe learned innately
@@ -201,6 +201,49 @@ class ItemHead(nn.Module):
         cond = h_t + self.action_cond(action_t)
         return self.fc(cond)
 
+    def sampled_logits(
+        self,
+        h_t: torch.Tensor,            # [M, d_model]
+        action_t: torch.Tensor,       # [M]
+        positive_ids: torch.Tensor,   # [M]    long, true targets
+        negative_ids: torch.Tensor,   # [K]    long, shared negatives for this step
+        log_q: torch.Tensor,          # [V]    fp32, log of the proposal Q(w) ∝ U(w)^alpha
+    ) -> torch.Tensor:                # [M, 1 + K]  (positive is column 0)
+        """
+        Sampled-softmax logits with log-Q correction and accidental-hit masking.
+
+        Target class for the downstream CE is always column 0 (the positive).
+        Shared negatives: one draw per step is ~100x faster than per-example and
+        is statistically fine because the M positives stratify the shared noise
+        through their distinct h_t vectors.
+        """
+        cond = h_t + self.action_cond(action_t)           # [M, d_model]
+        W = self.fc.weight                                # [V, d_model]
+        b = self.fc.bias                                  # [V]
+
+        w_pos = W.index_select(0, positive_ids)           # [M, d_model]
+        b_pos = b.index_select(0, positive_ids)           # [M]
+        w_neg = W.index_select(0, negative_ids)           # [K, d_model]
+        b_neg = b.index_select(0, negative_ids)           # [K]
+
+        # Positive logit per row: (cond_m . w_pos_m) + b_pos_m
+        logit_pos = (cond * w_pos).sum(dim=-1) + b_pos    # [M]
+        # Negative logits: same negatives shared across rows
+        logit_neg = cond @ w_neg.t() + b_neg              # [M, K]
+
+        # log-Q correction: s'(w) = s(w) - log Q(w). log_q is fp32; subtraction
+        # promotes fp16 logits to fp32 automatically, which CE is happy with.
+        logit_pos = logit_pos - log_q.index_select(0, positive_ids)
+        logit_neg = logit_neg - log_q.index_select(0, negative_ids).unsqueeze(0)
+
+        # Accidental-hit masking: wherever a sampled negative equals the row's
+        # positive, suppress it from the softmax. Per-row mask because each row
+        # has a different positive.
+        hit = negative_ids.unsqueeze(0).eq(positive_ids.unsqueeze(1))   # [M, K]
+        logit_neg = logit_neg.masked_fill(hit, torch.finfo(logit_neg.dtype).min)
+
+        return torch.cat([logit_pos.unsqueeze(1), logit_neg], dim=1)    # [M, 1+K]
+
 
 class TemporalHead(nn.Module):
     """
@@ -306,6 +349,7 @@ class SessionTransformer(nn.Module):
         history: Optional[dict] = None,               # keys: events/items/deltas ->[B, H]
         tgt_key_padding_mask: Optional[torch.Tensor] = None,  # [B, T-1] True=pad
         item_mask: Optional[torch.Tensor] = None,     # [B, T-1] bool -item positions only
+        item_head_mode: str = "full",                 # "full" | "ctx"
     ):
         """
         Teacher-forced training pass.
@@ -313,14 +357,23 @@ class SessionTransformer(nn.Module):
         Input tokens  : t = 0 .. T-2
         Target tokens : t = 1 .. T-1   (shifted by 1)
 
-        Returns:
+        Returns (4-tuple):
         action_logits   : [B, T-1, n_actions]
-        item_logits     : [M, vocab_size]   if item_mask provided (M = item_mask.sum())
-                          [B, T-1, vocab_size]  otherwise (may OOM for large vocabs)
+        item_logits     : [M, vocab_size]          if item_head_mode == "full" (sparse w/ mask)
+                          [B, T-1, vocab_size]     if item_head_mode == "full" and item_mask is None
+                          None                     if item_head_mode == "ctx"
         temporal_logits : [B, T-1, n_bins]
+        item_ctx        : (h_item, tgt_e_item) tuple if item_head_mode == "ctx" else None
 
         item_mask should be precomputed in the training loop (valid & tgt_is_item)
         to avoid allocating the full [B, T-1, vocab_size] tensor.
+
+        item_head_mode:
+            "full" - compute item_logits via the full V-way linear projection
+                     (used for iter1-style full-softmax loss and for validation).
+            "ctx"  - skip the projection; return the pre-projection (h_item, tgt_e_item)
+                     so the caller can invoke ItemHead.sampled_logits() with its own
+                     negatives. Used by sampled-softmax training.
         """
         in_e  = events[:, :-1]   # [B, T-1] -model input
         in_i  = items[:, :-1]
@@ -341,8 +394,13 @@ class SessionTransformer(nn.Module):
 
         memory = self._encode_history(history, B, device)  # [B, >=1, d_model]
 
+        # Newer torch requires an explicit tgt_mask when tgt_is_causal=True
+        # (otherwise F.multi_head_attention_forward raises under torch.compile).
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device)
+
         h = self.decoder(
             x, memory,
+            tgt_mask=tgt_mask,
             tgt_is_causal=True,
             tgt_key_padding_mask=tgt_key_padding_mask,
         )  # [B, T, d_model]
@@ -354,15 +412,27 @@ class SessionTransformer(nn.Module):
 
         temporal_logits = self.temporal_head(h, tgt_e, tgt_item_emb)  # [B, T, n_bins]
 
+        item_ctx = None
         if item_mask is not None:
             # Sparse: only compute item logits at item-bearing positions ->[M, vocab_size]
             h_item      = h[item_mask]       # [M, d_model]
             tgt_e_item  = tgt_e[item_mask]   # [M]
-            item_logits = self.item_head(h_item, tgt_e_item)   # [M, vocab_size]
+            if item_head_mode == "full":
+                item_logits = self.item_head(h_item, tgt_e_item)   # [M, vocab_size]
+            elif item_head_mode == "ctx":
+                item_logits = None
+                item_ctx    = (h_item, tgt_e_item)
+            else:
+                raise ValueError(f"unknown item_head_mode={item_head_mode!r}")
         else:
-            item_logits = self.item_head(h, tgt_e)             # [B, T, vocab_size]
+            if item_head_mode == "full":
+                item_logits = self.item_head(h, tgt_e)             # [B, T, vocab_size]
+            else:
+                raise ValueError(
+                    f"item_head_mode={item_head_mode!r} requires item_mask"
+                )
 
-        return action_logits, item_logits, temporal_logits
+        return action_logits, item_logits, temporal_logits, item_ctx
 
     # Autoregressive inference
 

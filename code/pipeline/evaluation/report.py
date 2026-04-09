@@ -34,42 +34,56 @@ class ReportGenerator:
         def mean_std(mean_v, std_v, decimals=4):
             return f"{fmt(mean_v, decimals)} ± {fmt(std_v, decimals)}"
 
-        # --- Fidelity tables (train and val reference) ---
-        # (name, mean_val, std_val, range_str, direction)
-        def _fidelity_rows(mean, std):
-            return [
-                ("JSD (action dist.)",   mean.jsd_action,               std.jsd_action,            "[0, 1]", "↓ lower is better"),
-                ("KS (session length)",  mean.ks_session_length,        std.ks_session_length,     "[0, 1]", "↓ lower is better"),
-                ("KS (temporal delta)",  mean.ks_temporal_delta,        std.ks_temporal_delta,     "[0, 1]", "↓ lower is better"),
-                ("L1 (action bigrams)",  mean.l1_action_bigrams,        std.l1_action_bigrams,     "[0, 2]", "↓ lower is better"),
-                ("L1 (item bigrams)",    mean.l1_item_bigrams,          std.l1_item_bigrams,       "[0, 2]", "↓ lower is better"),
-                ("Sample diversity",     mean.sample_diversity,         std.sample_diversity,      "ratio",   "1.0 = ideal (synth/real Jaccard)"),
-                ("Conv. rate delta",     mean.conversion_rate_delta,    std.conversion_rate_delta, "[0, 1]", "↓ lower is better"),
-                ("Cart abandon. delta",  mean.cart_abandonment_delta,   std.cart_abandonment_delta,"[0, 1]", "↓ lower is better"),
-                ("Item coverage",        mean.bias.item_coverage,            std.bias.item_coverage,            "[0, 1]", "↑ higher is better"),
-                ("JSD (popularity)",     mean.bias.popularity_jsd,           std.bias.popularity_jsd,           "[0, 1]", "↓ lower is better"),
-                ("Gini coeff. delta",    mean.bias.gini_coefficient_delta,   std.bias.gini_coefficient_delta,   "[0, 1]", "↓ lower is better"),
-            ]
+        # --- Fidelity tables (train and val reference, 3-column: Transformer | Markov | TRTR) ---
+        FIDELITY_METRICS = [
+            ("JSD (action dist.)",  "jsd_action",               "[0, 1]", "↓ lower is better"),
+            ("KS (session length)", "ks_session_length",        "[0, 1]", "↓ lower is better"),
+            ("KS (temporal delta)", "ks_temporal_delta",        "[0, 1]", "↓ lower is better"),
+            ("L1 (action bigrams)", "l1_action_bigrams",        "[0, 2]", "↓ lower is better"),
+            ("L1 (item bigrams)",   "l1_item_bigrams",          "[0, 2]", "↓ lower is better"),
+            ("Sample diversity",    "sample_diversity",         "ratio",  "1.0 = ideal (synth/real Jaccard)"),
+            ("Conv. rate delta",    "conversion_rate_delta",    "[0, 1]", "↓ lower is better"),
+            ("Cart abandon. delta", "cart_abandonment_delta",   "[0, 1]", "↓ lower is better"),
+        ]
+        BIAS_METRICS = [
+            ("Item coverage",     "item_coverage",          "[0, 1]", "↑ higher is better"),
+            ("JSD (popularity)",  "popularity_jsd",         "[0, 1]", "↓ lower is better"),
+            ("Gini coeff. delta", "gini_coefficient_delta", "[0, 1]", "↓ lower is better"),
+        ]
 
-        fidelity_train_html = _table(
-            ["Metric", "Mean ± Std", "Range", "Direction"],
-            [[name, mean_std(m, s), rng, direction] for name, m, s, rng, direction in
-             _fidelity_rows(ar.fidelity_train_mean, ar.fidelity_train_std)],
+        def _col(mean, std, attr, bias=False):
+            obj_m = mean.bias if bias else mean
+            obj_s = std.bias  if bias else std
+            return mean_std(getattr(obj_m, attr), getattr(obj_s, attr))
+
+        def _fidelity_compare_table(t_mean, t_std, m_mean, m_std, rr_mean, rr_std):
+            rows = []
+            for label, attr, rng, direction in FIDELITY_METRICS:
+                rows.append([label,
+                             _col(t_mean,  t_std,  attr),
+                             _col(m_mean,  m_std,  attr),
+                             _col(rr_mean, rr_std, attr),
+                             rng, direction])
+            for label, attr, rng, direction in BIAS_METRICS:
+                rows.append([label,
+                             _col(t_mean,  t_std,  attr, bias=True),
+                             _col(m_mean,  m_std,  attr, bias=True),
+                             _col(rr_mean, rr_std, attr, bias=True),
+                             rng, direction])
+            return _table(
+                ["Metric", "Transformer", "Markov", "TRTR (real sample)", "Range", "Direction"],
+                rows,
+            )
+
+        fidelity_train_html = _fidelity_compare_table(
+            ar.fidelity_train_mean,        ar.fidelity_train_std,
+            ar.fidelity_markov_train_mean, ar.fidelity_markov_train_std,
+            ar.fidelity_trtr_train_mean,   ar.fidelity_trtr_train_std,
         )
-        fidelity_val_html = _table(
-            ["Metric", "Mean ± Std", "Range", "Direction"],
-            [[name, mean_std(m, s), rng, direction] for name, m, s, rng, direction in
-             _fidelity_rows(ar.fidelity_val_mean, ar.fidelity_val_std)],
-        )
-        fidelity_markov_train_html = _table(
-            ["Metric", "Mean ± Std", "Range", "Direction"],
-            [[name, mean_std(m, s), rng, direction] for name, m, s, rng, direction in
-             _fidelity_rows(ar.fidelity_markov_train_mean, ar.fidelity_markov_train_std)],
-        )
-        fidelity_markov_val_html = _table(
-            ["Metric", "Mean ± Std", "Range", "Direction"],
-            [[name, mean_std(m, s), rng, direction] for name, m, s, rng, direction in
-             _fidelity_rows(ar.fidelity_markov_val_mean, ar.fidelity_markov_val_std)],
+        fidelity_val_html = _fidelity_compare_table(
+            ar.fidelity_val_mean,        ar.fidelity_val_std,
+            ar.fidelity_markov_val_mean, ar.fidelity_markov_val_std,
+            ar.fidelity_trtr_val_mean,   ar.fidelity_trtr_val_std,
         )
 
         # --- Validity table ---
@@ -130,21 +144,13 @@ class ReportGenerator:
 <h1>Synthetic Session Evaluation Report</h1>
 <p><strong>Seeds:</strong> {num_seeds}</p>
 
-<h2>Transformer — Fidelity vs Training Distribution</h2>
-<p>How well does transformer synthetic data match the distribution the generator was trained on?</p>
+<h2>Fidelity vs Training Distribution</h2>
+<p>How well does each dataset match the distribution the generator was trained on? TRTR (real sample) is the upper bound reference.</p>
 {fidelity_train_html}
 
-<h2>Transformer — Fidelity vs Validation Distribution (Generalization Check)</h2>
-<p>How well does transformer synthetic data match the unseen validation period (Nov 15 – Dec 1)?</p>
+<h2>Fidelity vs Validation Distribution (Generalization Check)</h2>
+<p>How well does each dataset match the unseen validation period (Nov 15 – Dec 1)?</p>
 {fidelity_val_html}
-
-<h2>Markov Baseline — Fidelity vs Training Distribution</h2>
-<p>How well does Markov baseline synthetic data match the training distribution?</p>
-{fidelity_markov_train_html}
-
-<h2>Markov Baseline — Fidelity vs Validation Distribution</h2>
-<p>How well does Markov baseline synthetic data match the unseen validation period?</p>
-{fidelity_markov_val_html}
 
 <h2>Validity</h2>
 {validity_html}

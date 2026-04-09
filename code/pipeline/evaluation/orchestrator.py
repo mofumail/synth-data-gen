@@ -209,12 +209,20 @@ class EvaluationOrchestrator:
             reference_cond = "TRTR",
         )
 
+        # --- Fidelity of TRTR sample vs reference distributions ---
+        print("  Computing TRTR fidelity vs train ...")
+        fidelity_trtr_train = fid_ev.evaluate(real_data, real_train_sample, ref_store)
+        print("  Computing TRTR fidelity vs val ...")
+        fidelity_trtr_val   = fid_ev.evaluate(real_data, real_train_sample, val_ref_store)
+
         result = SeedResult(
             seed                  = seed,
             fidelity_train        = fidelity_train,
             fidelity_val          = fidelity_val,
             fidelity_markov_train = fidelity_markov_train,
             fidelity_markov_val   = fidelity_markov_val,
+            fidelity_trtr_train   = fidelity_trtr_train,
+            fidelity_trtr_val     = fidelity_trtr_val,
             validity_pre          = validity_pre,
             validity_post         = validity_post,
             utility               = [util_T, util_M, util_RR],
@@ -280,6 +288,10 @@ class EvaluationOrchestrator:
             fidelity_markov_train_std  = _agg_fidelity("fidelity_markov_train", np.std),
             fidelity_markov_val_mean   = _agg_fidelity("fidelity_markov_val",   np.mean),
             fidelity_markov_val_std    = _agg_fidelity("fidelity_markov_val",   np.std),
+            fidelity_trtr_train_mean   = _agg_fidelity("fidelity_trtr_train",   np.mean),
+            fidelity_trtr_train_std    = _agg_fidelity("fidelity_trtr_train",   np.std),
+            fidelity_trtr_val_mean     = _agg_fidelity("fidelity_trtr_val",     np.mean),
+            fidelity_trtr_val_std      = _agg_fidelity("fidelity_trtr_val",     np.std),
             validity_pre_mean  = _agg_validity("validity_pre",  np.mean),
             validity_pre_std   = _agg_validity("validity_pre",  np.std),
             validity_post_mean = _agg_validity("validity_post", np.mean),
