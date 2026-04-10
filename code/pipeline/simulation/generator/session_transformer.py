@@ -26,7 +26,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
 
-from config import N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S, VOCAB_K
+from config import N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S, VOCAB_K, N_CATEGORIES
 
 # Action vocabulary, matches ALL_EVENT_TYPES + EOS
 ACTION_TYPES = [
@@ -180,25 +180,60 @@ class ActionHead(nn.Module):
         return self.constraint_mask.apply(logits, last_action_idx)
 
 
-class ItemHead(nn.Module):
+class CategoryHead(nn.Module):
     """
-    Predicts next SKU. Conditioned on action_t via a small action embedding
-    (avoids coupling the full 630K-embedding to this head).
-    Top-k is enforced at inference time in SessionTransformer.infer().
+    Predicts next item category.
+    Conditioned on action_t: category = fc(h_t + action_cond(action_t))
+
+    Only applied at item-bearing positions (add_to_cart, remove_from_cart, product_buy).
+    n_categories: 0=PAD, 1=RARE, 2..N=regular categories (built by preprocess.py).
     """
 
-    def __init__(self, d_model: int, vocab_size: int, top_k: int = 100):
+    def __init__(self, d_model: int, n_categories: int):
+        super().__init__()
+        self.fc          = nn.Linear(d_model, n_categories)
+        self.action_cond = nn.Embedding(N_ACTIONS, d_model)
+        self.n_categories = n_categories
+
+    def forward(
+        self,
+        h_t: torch.Tensor,       # [M, d_model]
+        action_t: torch.Tensor,  # [M]
+    ) -> torch.Tensor:           # [M, n_categories]
+        cond = h_t + self.action_cond(action_t)
+        return self.fc(cond)
+
+
+class ItemHead(nn.Module):
+    """
+    Predicts next SKU. Conditioned on action_t and (optionally) category_t.
+    Top-k is enforced at inference time in SessionTransformer.infer().
+
+    Hierarchical conditioning (when category_cond is set):
+        cond = h_t + action_cond(action_t) + category_cond(category_t)
+    Standard conditioning:
+        cond = h_t + action_cond(action_t)
+    """
+
+    def __init__(self, d_model: int, vocab_size: int, n_categories: int = 0, top_k: int = 100):
         super().__init__()
         self.fc          = nn.Linear(d_model, vocab_size)
         self.top_k       = top_k
         self.action_cond = nn.Embedding(N_ACTIONS, d_model)
+        if n_categories > 0:
+            self.category_cond = nn.Embedding(n_categories, d_model, padding_idx=0)
+        else:
+            self.category_cond = None
 
     def forward(
         self,
-        h_t: torch.Tensor,       # [B, d_model] or [B, T, d_model]
-        action_t: torch.Tensor,  # [B] or [B, T] -action indices
-    ) -> torch.Tensor:           # [B, vocab_size] or [B, T, vocab_size]
+        h_t: torch.Tensor,                        # [B, d_model] or [B, T, d_model]
+        action_t: torch.Tensor,                   # [B] or [B, T]
+        category_t: Optional[torch.Tensor] = None,  # [B] or [B, T], None for non-hierarchical
+    ) -> torch.Tensor:                             # [B, vocab_size] or [B, T, vocab_size]
         cond = h_t + self.action_cond(action_t)
+        if self.category_cond is not None and category_t is not None:
+            cond = cond + self.category_cond(category_t)
         return self.fc(cond)
 
     def sampled_logits(
@@ -208,6 +243,7 @@ class ItemHead(nn.Module):
         positive_ids: torch.Tensor,   # [M]    long, true targets
         negative_ids: torch.Tensor,   # [K]    long, shared negatives for this step
         log_q: torch.Tensor,          # [V]    fp32, log of the proposal Q(w) ∝ U(w)^alpha
+        category_t: Optional[torch.Tensor] = None,  # [M] for hierarchical mode
     ) -> torch.Tensor:                # [M, 1 + K]  (positive is column 0)
         """
         Sampled-softmax logits with log-Q correction and accidental-hit masking.
@@ -218,6 +254,8 @@ class ItemHead(nn.Module):
         through their distinct h_t vectors.
         """
         cond = h_t + self.action_cond(action_t)           # [M, d_model]
+        if self.category_cond is not None and category_t is not None:
+            cond = cond + self.category_cond(category_t)
         W = self.fc.weight                                # [V, d_model]
         b = self.fc.bias                                  # [V]
 
@@ -310,16 +348,58 @@ class SessionTransformer(nn.Module):
         n_temporal_bins: int = N_TEMPORAL_BINS,
         window_H: int = 50,
         valid_transitions: dict = None,
+        n_categories: int = 0,    # 0 = no category head (backward-compat)
+        sku_price_table: Optional[np.ndarray] = None,  # [V] long, 0=PAD, real=bucket+1
+        sku_name_table:  Optional[np.ndarray] = None,  # [V, 16] long, 0=PAD
+        price_bins: int = 100,
+        name_vocab: int = 256,
+        name_len: int = 16,
     ):
         super().__init__()
-        self.d_model    = d_model
-        self.vocab_size = vocab_size
+        self.d_model      = d_model
+        self.vocab_size   = vocab_size
+        self.n_categories = n_categories
 
         # Shared embedding tables
         self.event_emb = nn.Embedding(n_actions, d_model)
         self.item_emb  = nn.Embedding(vocab_size + 1, d_model, padding_idx=0)
         self.delta_emb = nn.Embedding(n_temporal_bins, d_model)
         self.pos_emb   = nn.Embedding(512, d_model)
+
+        # --- Input-side auxiliary feature embeddings ---
+        # Category as an *input* signal (what the user is currently browsing/buying).
+        # Separate from the CategoryHead's `action_cond` — that one is for the target
+        # conditional; this one enters the encoder alongside event/item/delta.
+        if n_categories > 0:
+            self.cat_input_emb = nn.Embedding(n_categories, d_model, padding_idx=0)
+        else:
+            self.cat_input_emb = None
+
+        # Price bucket as an input signal. Indexed by SKU via lookup table.
+        self.price_bins = price_bins
+        if sku_price_table is not None:
+            self.price_emb = nn.Embedding(price_bins + 1, d_model, padding_idx=0)
+            self.register_buffer(
+                "sku_price",
+                torch.as_tensor(sku_price_table, dtype=torch.long),
+                persistent=False,   # not in state_dict; rebuilt from joblib at load
+            )
+        else:
+            self.price_emb = None
+
+        # Quantized name tokens per SKU (16 tokens of 256-way vocab). Mean-pooled
+        # into a single d_model vector per item and added to the input sum.
+        self.name_vocab = name_vocab
+        self.name_len   = name_len
+        if sku_name_table is not None:
+            self.name_tok_emb = nn.Embedding(name_vocab, d_model)
+            self.register_buffer(
+                "sku_name",
+                torch.as_tensor(sku_name_table, dtype=torch.long),
+                persistent=False,
+            )
+        else:
+            self.name_tok_emb = None
 
         # Causal decoder backbone (cross-attention to history memory)
         decoder_layer = nn.TransformerDecoderLayer(
@@ -336,8 +416,38 @@ class SessionTransformer(nn.Module):
 
         # Prediction heads
         self.action_head   = ActionHead(d_model, n_actions, valid_transitions or {})
-        self.item_head     = ItemHead(d_model, vocab_size, top_k=100)
+        self.category_head = CategoryHead(d_model, n_categories) if n_categories > 0 else None
+        self.item_head     = ItemHead(d_model, vocab_size, n_categories=n_categories, top_k=100)
         self.temporal_head = TemporalHead(d_model, n_temporal_bins)
+
+        # Populated at inference time via set_cat_sku_pools()
+        self._cat_sku_pools = None
+
+    # Shared input builder (forward + infer)
+    def _build_input(
+        self,
+        events: torch.Tensor,      # [B, T] long
+        items:  torch.Tensor,      # [B, T] long
+        deltas: torch.Tensor,      # [B, T] long
+        categories: Optional[torch.Tensor],  # [B, T] long or None
+        pos:    torch.Tensor,      # [1, T] or [B, T] long
+    ) -> torch.Tensor:              # [B, T, d_model]
+        """Sum of all input-side embeddings (event/item/delta/pos + aux features)."""
+        x = (
+            self.event_emb(events)
+            + self.item_emb(items)
+            + self.delta_emb(deltas)
+            + self.pos_emb(pos)
+        )
+        if self.cat_input_emb is not None and categories is not None:
+            x = x + self.cat_input_emb(categories)
+        if self.price_emb is not None:
+            x = x + self.price_emb(self.sku_price[items])
+        if self.name_tok_emb is not None:
+            # [B, T, name_len] -> embed -> [B, T, name_len, d] -> mean over tokens
+            name_ids = self.sku_name[items]                        # [B, T, L]
+            x = x + self.name_tok_emb(name_ids).mean(dim=-2)       # [B, T, d]
+        return x
 
     # Training forward (teacher-forced, gold conditioning)
 
@@ -346,10 +456,11 @@ class SessionTransformer(nn.Module):
         events: torch.Tensor,                         # [B, T] action indices
         items: torch.Tensor,                          # [B, T] item indices (0=no item)
         deltas: torch.Tensor,                         # [B, T] temporal bin indices
+        categories: Optional[torch.Tensor] = None,   # [B, T] dense cat indices (0=PAD)
         history: Optional[dict] = None,               # keys: events/items/deltas ->[B, H]
         tgt_key_padding_mask: Optional[torch.Tensor] = None,  # [B, T-1] True=pad
         item_mask: Optional[torch.Tensor] = None,     # [B, T-1] bool -item positions only
-        item_head_mode: str = "full",                 # "full" | "ctx"
+        item_head_mode: str = "full",                 # "full" | "ctx" | "hier"
     ):
         """
         Teacher-forced training pass.
@@ -357,40 +468,33 @@ class SessionTransformer(nn.Module):
         Input tokens  : t = 0 .. T-2
         Target tokens : t = 1 .. T-1   (shifted by 1)
 
-        Returns (4-tuple):
+        Returns (5-tuple):
         action_logits   : [B, T-1, n_actions]
-        item_logits     : [M, vocab_size]          if item_head_mode == "full" (sparse w/ mask)
-                          [B, T-1, vocab_size]     if item_head_mode == "full" and item_mask is None
-                          None                     if item_head_mode == "ctx"
+        category_logits : [M, n_categories] at item-bearing positions, or None
+        item_logits     : [M, vocab_size] if "full"; None if "ctx"/"hier"
         temporal_logits : [B, T-1, n_bins]
-        item_ctx        : (h_item, tgt_e_item) tuple if item_head_mode == "ctx" else None
-
-        item_mask should be precomputed in the training loop (valid & tgt_is_item)
-        to avoid allocating the full [B, T-1, vocab_size] tensor.
+        item_ctx        : (h_item, tgt_e_item, tgt_c_item) if "hier"/"ctx"; else None
+                          tgt_c_item is None when category head is not active.
 
         item_head_mode:
-            "full" - compute item_logits via the full V-way linear projection
-                     (used for iter1-style full-softmax loss and for validation).
-            "ctx"  - skip the projection; return the pre-projection (h_item, tgt_e_item)
-                     so the caller can invoke ItemHead.sampled_logits() with its own
-                     negatives. Used by sampled-softmax training.
+            "full"  - full V-way CE; used for val and non-sampled training.
+            "ctx"   - return (h_item, tgt_e_item, None) for global sampled softmax.
+            "hier"  - return (h_item, tgt_e_item, tgt_c_item) for within-category
+                      sampled softmax; requires categories != None.
         """
         in_e  = events[:, :-1]   # [B, T-1] -model input
         in_i  = items[:, :-1]
         in_d  = deltas[:, :-1]
+        in_c  = categories[:, :-1] if categories is not None else None  # input-side categories
         tgt_e = events[:, 1:]    # [B, T-1] -gold next actions (for conditioning)
         tgt_i = items[:, 1:]     # [B, T-1] -gold next items
+        tgt_c = categories[:, 1:] if categories is not None else None  # [B, T-1] gold next cats
 
         B, T = in_e.shape
         device = in_e.device
 
         pos = torch.arange(T, device=device).unsqueeze(0)   # [1, T]
-        x   = (
-            self.event_emb(in_e)
-            + self.item_emb(in_i)
-            + self.delta_emb(in_d)
-            + self.pos_emb(pos)
-        )  # [B, T, d_model]
+        x   = self._build_input(in_e, in_i, in_d, in_c, pos)   # [B, T, d_model]
 
         memory = self._encode_history(history, B, device)  # [B, >=1, d_model]
 
@@ -407,32 +511,40 @@ class SessionTransformer(nn.Module):
 
         action_logits = self.action_head(h)                      # [B, T, n_actions]
 
-        # Pre-embed gold next items (shared table) for item + temporal heads
+        # Pre-embed gold next items (shared table) for temporal head
         tgt_item_emb = self.item_emb(tgt_i)                     # [B, T, d_model]
-
         temporal_logits = self.temporal_head(h, tgt_e, tgt_item_emb)  # [B, T, n_bins]
 
-        item_ctx = None
+        category_logits = None
+        item_logits     = None
+        item_ctx        = None
+
         if item_mask is not None:
-            # Sparse: only compute item logits at item-bearing positions ->[M, vocab_size]
+            # Sparse: only compute heads at item-bearing positions -> [M, ...]
             h_item      = h[item_mask]       # [M, d_model]
             tgt_e_item  = tgt_e[item_mask]   # [M]
+            tgt_c_item  = tgt_c[item_mask] if tgt_c is not None else None  # [M]
+
+            # Category head (always runs when available, regardless of item_head_mode)
+            if self.category_head is not None:
+                category_logits = self.category_head(h_item, tgt_e_item)  # [M, n_cats]
+
             if item_head_mode == "full":
-                item_logits = self.item_head(h_item, tgt_e_item)   # [M, vocab_size]
-            elif item_head_mode == "ctx":
+                item_logits = self.item_head(h_item, tgt_e_item, tgt_c_item)
+            elif item_head_mode in ("ctx", "hier"):
                 item_logits = None
-                item_ctx    = (h_item, tgt_e_item)
+                item_ctx    = (h_item, tgt_e_item, tgt_c_item)
             else:
                 raise ValueError(f"unknown item_head_mode={item_head_mode!r}")
         else:
             if item_head_mode == "full":
-                item_logits = self.item_head(h, tgt_e)             # [B, T, vocab_size]
+                item_logits = self.item_head(h, tgt_e, tgt_c)
             else:
                 raise ValueError(
                     f"item_head_mode={item_head_mode!r} requires item_mask"
                 )
 
-        return action_logits, item_logits, temporal_logits, item_ctx
+        return action_logits, category_logits, item_logits, temporal_logits, item_ctx
 
     # Autoregressive inference
 
@@ -616,7 +728,8 @@ class SessionTransformer(nn.Module):
             i0 = torch.tensor([[s] for s in seed_items],        dtype=torch.long, device=device)
             d0 = torch.zeros(B, 1, dtype=torch.long, device=device)
             p0 = torch.zeros(1, 1, dtype=torch.long, device=device)
-            x  = self.event_emb(e0) + self.item_emb(i0) + self.delta_emb(d0) + self.pos_emb(p0)
+            c0 = torch.zeros(B, 1, dtype=torch.long, device=device)   # seed: PAD category
+            x  = self._build_input(e0, i0, d0, c0, p0)
 
                 # Pre-allocate KV buffers [B, max_steps+1, d] — no torch.cat in the hot loop
             kv_dtype = torch.bfloat16 if use_cuda else torch.float32
@@ -650,22 +763,75 @@ class SessionTransformer(nn.Module):
 
                 newly_done = (a_idxs == EOS_IDX) | done
 
-                # Item
+                # Item (hierarchical: sample category first, then item within category)
                 is_item = torch.zeros(B, dtype=torch.bool, device=device)
                 for idx in ITEM_BEARING_IDX:
                     is_item |= (a_idxs == idx)
                 is_item &= ~done
 
                 i_idxs = torch.zeros(B, dtype=torch.long, device=device)
+                c_full = torch.zeros(B, dtype=torch.long, device=device)   # category per session for input-side feed
                 if is_item.any():
-                    h_item   = h_t[is_item]
-                    a_item   = a_idxs[is_item]
-                    i_logits = self.item_head(h_item, a_item) / temperature
-                    k        = min(self.item_head.top_k, self.vocab_size)
-                    topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)
-                    i_probs  = F.softmax(topk_v.float(), dim=-1)
-                    chosen   = torch.multinomial(i_probs, 1).squeeze(1)
-                    i_idxs[is_item] = topk_ids.gather(1, chosen.unsqueeze(1)).squeeze(1)
+                    h_item = h_t[is_item]
+                    a_item = a_idxs[is_item]
+
+                    # --- Category sampling (hierarchical mode) ---
+                    if self.category_head is not None and self._cat_sku_pools is not None:
+                        cat_logits = self.category_head(h_item, a_item) / temperature
+                        cat_probs  = F.softmax(cat_logits.float(), dim=-1)
+                        c_idxs     = torch.multinomial(cat_probs, 1).squeeze(1)  # [M]
+
+                        # Per-session: sample item from within-category pool
+                        pools = self._cat_sku_pools   # list[Tensor] on device
+                        c_list = c_idxs.cpu().tolist()
+                        chosen_items = []
+                        for ci in c_list:
+                            pool = pools[ci] if ci < len(pools) else None
+                            if pool is not None and len(pool) > 0:
+                                k_pool = min(self.item_head.top_k, len(pool))
+                                # Score only items in this category's pool
+                                w_pool = self.item_head.fc.weight.index_select(0, pool[:k_pool])
+                                b_pool = self.item_head.fc.bias.index_select(0, pool[:k_pool])
+                                # Use h_item for the current session (indexed via loop pos)
+                                pass   # will be handled per-item below
+                                chosen_items.append((pool, ci))
+                            else:
+                                chosen_items.append((None, ci))
+
+                        # Vectorized per-session within-category item sampling
+                        item_result = torch.zeros(is_item.sum(), dtype=torch.long, device=device)
+                        for m, (pool, ci) in enumerate(chosen_items):
+                            h_m = h_item[m:m+1]   # [1, d_model]
+                            a_m = a_item[m:m+1]
+                            c_m = c_idxs[m:m+1]
+                            if pool is not None and len(pool) > 0:
+                                k_pool = min(self.item_head.top_k, len(pool))
+                                pool_k = pool[:k_pool]
+                                w_pool = self.item_head.fc.weight.index_select(0, pool_k)
+                                b_pool = self.item_head.fc.bias.index_select(0, pool_k)
+                                cond   = h_m + self.item_head.action_cond(a_m) + self.item_head.category_cond(c_m)
+                                logits = (cond @ w_pool.t() + b_pool) / temperature
+                                probs  = F.softmax(logits.float(), dim=-1)
+                                chosen = int(torch.multinomial(probs, 1).item())
+                                item_result[m] = pool_k[chosen]
+                            else:
+                                # Fallback: global top-k
+                                i_logits = self.item_head(h_m, a_m, c_m) / temperature
+                                k_fb = min(self.item_head.top_k, self.vocab_size)
+                                topk_v, topk_ids = torch.topk(i_logits, k_fb, dim=-1)
+                                probs = F.softmax(topk_v.float(), dim=-1)
+                                chosen = int(torch.multinomial(probs, 1).item())
+                                item_result[m] = topk_ids[0, chosen]
+                        i_idxs[is_item] = item_result
+                        c_full[is_item] = c_idxs
+                    else:
+                        # Standard (non-hierarchical) item sampling
+                        i_logits = self.item_head(h_item, a_item) / temperature
+                        k        = min(self.item_head.top_k, self.vocab_size)
+                        topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)
+                        i_probs  = F.softmax(topk_v.float(), dim=-1)
+                        chosen   = torch.multinomial(i_probs, 1).squeeze(1)
+                        i_idxs[is_item] = topk_ids.gather(1, chosen.unsqueeze(1)).squeeze(1)
 
                 # Temporal
                 i_emb_t  = self.item_emb(i_idxs)
@@ -698,11 +864,12 @@ class SessionTransformer(nn.Module):
 
             with autocast_ctx:
                 pos_t = torch.tensor([[step + 1]], dtype=torch.long, device=device)
-                x = (
-                    self.event_emb(a_idxs.unsqueeze(1))
-                    + self.item_emb(i_idxs.unsqueeze(1))
-                    + self.delta_emb(bin_idxs.unsqueeze(1))
-                    + self.pos_emb(pos_t)
+                x = self._build_input(
+                    a_idxs.unsqueeze(1),
+                    i_idxs.unsqueeze(1),
+                    bin_idxs.unsqueeze(1),
+                    c_full.unsqueeze(1),
+                    pos_t,
                 )
                 x = self._run_decoder_prealloc(x, kv_buf, t=step + 1, memory=memory)
 
@@ -757,6 +924,18 @@ class SessionTransformer(nn.Module):
 
     # Checkpoint I/O
 
+    def set_cat_sku_pools(self, cat_sku_pools: list, device) -> None:
+        """
+        Register per-category SKU index pools for hierarchical inference.
+        cat_sku_pools: list[np.ndarray] indexed by dense_cat_idx (from get_cat_vocab).
+        Stored as a list of tensors on the given device.
+        """
+        self._cat_sku_pools = [
+            torch.from_numpy(p).long().to(device) if len(p) > 0
+            else torch.tensor([], dtype=torch.long, device=device)
+            for p in cat_sku_pools
+        ]
+
     def save(self, path) -> None:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -770,6 +949,9 @@ class SessionTransformer(nn.Module):
                 "n_heads":         self.decoder.layers[0].self_attn.num_heads,
                 "n_temporal_bins": self.temporal_head.n_bins,
                 "window_H":        self.history.window_H,
+                "n_categories":    self.n_categories,
+                "has_price":       self.price_emb is not None,
+                "has_name":        self.name_tok_emb is not None,
             },
         }, path)
         print(f"  SessionTransformer saved ->{path}")
@@ -784,7 +966,21 @@ class SessionTransformer(nn.Module):
         path       = Path(path)
         checkpoint = torch.load(path, map_location=device, weights_only=False)
         cfg        = checkpoint["config"]
-        model      = cls(
+
+        # Rebuild SKU property tables (not in state_dict — persistent=False buffers).
+        sku_price_tbl = sku_name_tbl = None
+        if cfg.get("has_price", False) or cfg.get("has_name", False):
+            try:
+                from ingestion.dataset import get_sku_properties
+                props = get_sku_properties()
+                if cfg.get("has_price", False):
+                    sku_price_tbl = props["price"]
+                if cfg.get("has_name", False):
+                    sku_name_tbl  = props["name"]
+            except Exception as e:
+                print(f"  [warn] failed to load sku_properties for inference: {e}")
+
+        model = cls(
             vocab_size        = cfg["vocab_size"],
             d_model           = cfg["d_model"],
             n_actions         = cfg["n_actions"],
@@ -793,10 +989,30 @@ class SessionTransformer(nn.Module):
             n_temporal_bins   = cfg["n_temporal_bins"],
             window_H          = cfg["window_H"],
             valid_transitions = valid_transitions or {},
+            n_categories      = cfg.get("n_categories", 0),
+            sku_price_table   = sku_price_tbl,
+            sku_name_table    = sku_name_tbl,
         )
-        model.load_state_dict(checkpoint["state_dict"])
+        model._cat_sku_pools = None
+        model.load_state_dict(checkpoint["state_dict"], strict=False)
         model.to(device)
         model.eval()
+
+        # Auto-load per-category SKU pools so hierarchical inference actually fires
+        # (infer_batch falls back to global top-k when self._cat_sku_pools is None).
+        if cfg.get("n_categories", 0) > 0:
+            try:
+                from config import CAT_SKU_POOLS_PATH
+                import joblib as _jl
+                if CAT_SKU_POOLS_PATH.exists():
+                    pools = _jl.load(CAT_SKU_POOLS_PATH)
+                    model.set_cat_sku_pools(pools, device)
+                    print(f"  cat_sku_pools loaded ({len(pools)} categories)")
+                else:
+                    print(f"  [warn] n_categories={cfg['n_categories']} but {CAT_SKU_POOLS_PATH} missing — hierarchical inference disabled")
+            except Exception as e:
+                print(f"  [warn] failed to auto-load cat_sku_pools: {e}")
+
         print(f"  SessionTransformer loaded ← {path}")
         return model
 

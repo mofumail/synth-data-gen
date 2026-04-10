@@ -3,14 +3,20 @@ Merges the 6 raw Parquet files, deduplicates, sessionizes, and saves two Parquet
   - events_clean.parquet : train + val sessions (timestamp < VAL_CUTOFF)
   - events_test.parquet  : test sessions (timestamp >= VAL_CUTOFF), locked
 
+Also joins product_properties (category, price) onto item-bearing events and
+builds / saves cat2idx.joblib for hierarchical category→SKU training.
+
 Output columns:
     client_id   : int64
     timestamp   : datetime[us] (tz-naive UTC)
     event_type  : str
     session_id  : int32
     sku         : float64 (null for non-item-bearing events)
+    category    : int64   (null for non-item-bearing events)
+    price       : int64   (null for non-item-bearing events)
 """
 
+import joblib
 import polars as pl
 import pyarrow.parquet as pq
 import pandas as pd
@@ -18,6 +24,7 @@ import pandas as pd
 from config import (
     DATA_DIR, OUTPUT_DIR, CLEAN_PARQUET, TEST_PARQUET,
     DS_START, DS_END, VAL_CUTOFF, SESSION_TIMEOUT_MIN, PAGE_VISIT_SAMPLE,
+    CATEGORY_RARE_THRESHOLD, CAT2IDX_PATH,
 )
 
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -126,6 +133,68 @@ def sessionize(df: pl.DataFrame) -> pl.DataFrame:
     return df.drop(["_diff", "_new_sess"])
 
 
+def build_cat2idx(df_events: pl.DataFrame) -> dict:
+    """
+    Build category vocabulary from product_properties.
+
+    Mapping: raw_category_int -> dense index
+        0         : PAD (non-item-bearing events)
+        1         : RARE (categories with <= CATEGORY_RARE_THRESHOLD SKUs)
+        2 .. N    : regular categories, sorted by SKU count descending
+
+    Returns cat2idx dict and saves to CAT2IDX_PATH.
+    """
+    props = pl.read_parquet(
+        DATA_DIR / "product_properties.parquet",
+        columns=["sku", "category"],
+    )
+
+    cat_sizes = (
+        props.group_by("category")
+        .agg(pl.len().alias("n_skus"))
+        .sort("n_skus", descending=True)
+    )
+
+    rare_cats = set(
+        cat_sizes.filter(pl.col("n_skus") <= CATEGORY_RARE_THRESHOLD)["category"].to_list()
+    )
+    regular_cats = (
+        cat_sizes.filter(pl.col("n_skus") > CATEGORY_RARE_THRESHOLD)["category"].to_list()
+    )
+
+    cat2idx: dict = {cat: idx + 2 for idx, cat in enumerate(regular_cats)}
+    # All rare / unseen categories → index 1
+    n_categories = 2 + len(regular_cats)  # 0=PAD, 1=RARE, 2..N=regular
+
+    print(f"  Category vocab: {n_categories} tokens "
+          f"({len(regular_cats)} regular + 1 RARE + 1 PAD; "
+          f"{len(rare_cats)} raw cats collapsed to RARE)")
+
+    CAT2IDX_PATH.parent.mkdir(parents=True, exist_ok=True)
+    joblib.dump(cat2idx, CAT2IDX_PATH)
+    print(f"  cat2idx saved -> {CAT2IDX_PATH}")
+    return cat2idx
+
+
+def _join_product_properties(df: pl.DataFrame) -> pl.DataFrame:
+    """
+    Left-join product_properties (category, price) onto df by sku.
+    Non-item-bearing events (null sku) keep null category/price.
+    """
+    props = pl.read_parquet(
+        DATA_DIR / "product_properties.parquet",
+        columns=["sku", "category", "price"],
+    ).with_columns(pl.col("sku").cast(pl.Float64))
+
+    df = df.join(props, on="sku", how="left")
+    # Cast to nullable Int64 (null for non-item rows)
+    df = df.with_columns([
+        pl.col("category").cast(pl.Int64),
+        pl.col("price").cast(pl.Int64),
+    ])
+    return df
+
+
 def main():
     print("\nLoading item-bearing events...")
     atc = load_item_bearing("add_to_cart")
@@ -191,6 +260,20 @@ def main():
     print(f"\nSplit by VAL_CUTOFF ({VAL_CUTOFF}):")
     print(f"  train+val sessions : {df_trainval['session_id'].n_unique():>10,}  ({df_trainval.height:,} events)")
     print(f"  test sessions      : {df_test['session_id'].n_unique():>10,}  ({df_test.height:,} events)")
+
+    # Join product properties (category, price) onto both splits
+    print("\nJoining product_properties (category, price)...")
+    df_trainval = _join_product_properties(df_trainval)
+    df_test     = _join_product_properties(df_test)
+
+    item_rows = df_trainval.filter(pl.col("sku").is_not_null()).height
+    matched   = df_trainval.filter(pl.col("category").is_not_null()).height
+    print(f"  Item-bearing rows: {item_rows:,}  |  matched with category: {matched:,}  "
+          f"({matched/item_rows*100:.1f}%)")
+
+    # Build cat2idx vocabulary
+    print("\nBuilding category vocabulary...")
+    build_cat2idx(df_trainval)
 
     print(f"\nSaving train+val -> {CLEAN_PARQUET}")
     df_trainval.write_parquet(CLEAN_PARQUET)

@@ -29,6 +29,7 @@ from collections import defaultdict
 
 from config import (
     CLEAN_PARQUET, HISTORY_WINDOW, OUTPUT_DIR, TRAIN_CUTOFF, VAL_CUTOFF, VOCAB_K,
+    CAT2IDX_PATH, CAT_SKU_POOLS_PATH,
 )
 from simulation.generator.session_transformer import (
     ACTION2IDX, BIN_EDGES, EOS_IDX, N_TEMPORAL_BINS, TEMPORAL_MIN_S, TEMPORAL_MAX_S,
@@ -46,8 +47,12 @@ def _cache_valid(cache_file: str, parquet_path: str) -> bool:
         return False
     return os.path.getmtime(cache_file) >= os.path.getmtime(parquet_path)
 
-SKU2IDX_PATH     = OUTPUT_DIR / "sku2idx.joblib"
-VOCAB_STATS_PATH = OUTPUT_DIR / "vocab_stats.joblib"
+SKU2IDX_PATH        = OUTPUT_DIR / "sku2idx.joblib"
+VOCAB_STATS_PATH    = OUTPUT_DIR / "vocab_stats.joblib"
+SKU_PROPERTIES_PATH = OUTPUT_DIR / "sku_properties.joblib"
+NAME_LEN            = 16
+NAME_VOCAB          = 256
+PRICE_BINS          = 100
 
 
 def build_sku2idx(df_train_skus: pd.Series):
@@ -135,6 +140,123 @@ def ensure_vocab_stats() -> np.ndarray:
     return counts
 
 
+def get_sku_properties(sku2idx: dict = None) -> dict:
+    """
+    Build / load per-SKU auxiliary feature tables indexed by embedding index:
+        price : LongArray [VOCAB_K]       0 = PAD/unknown; real = bucket+1 (range 1..100)
+        name  : LongArray [VOCAB_K, 16]   0 = PAD/unknown; real = quantized token 0..255
+
+    Both are used as input-side features in the SessionTransformer
+    (looked up via the `items` tensor at train/inference time). Cached to disk.
+    """
+    if SKU_PROPERTIES_PATH.exists():
+        return joblib.load(SKU_PROPERTIES_PATH)
+    if sku2idx is None:
+        raise RuntimeError(
+            f"sku_properties not found at {SKU_PROPERTIES_PATH} and sku2idx not provided."
+        )
+
+    from config import DATA_DIR
+    props = pl.read_parquet(
+        DATA_DIR / "product_properties.parquet",
+        columns=["sku", "price", "name"],
+    )
+
+    V = VOCAB_K
+    price_tbl = np.zeros(V, dtype=np.int64)            # 0 = PAD
+    name_tbl  = np.zeros((V, NAME_LEN), dtype=np.int64)  # 0 = PAD
+
+    matched = 0
+    for row in props.iter_rows(named=True):
+        idx = sku2idx.get(int(row["sku"]))
+        if idx is None:
+            continue
+        # Price bucket 0..99 -> shift to 1..100 so 0 can mean PAD
+        p = int(row["price"])
+        if 0 <= p < PRICE_BINS:
+            price_tbl[idx] = p + 1
+        # Name: stringified 16-element array like "[193 102 ... ]"
+        name_str = row["name"]
+        if name_str:
+            try:
+                toks = np.fromstring(name_str.strip("[]"), sep=" ", dtype=np.int64)
+                if toks.size == NAME_LEN:
+                    # clip into [0, NAME_VOCAB-1] just in case
+                    name_tbl[idx] = np.clip(toks, 0, NAME_VOCAB - 1)
+            except Exception:
+                pass
+        matched += 1
+
+    out = {"price": price_tbl, "name": name_tbl}
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(out, SKU_PROPERTIES_PATH)
+    print(
+        f"  sku_properties saved -> {SKU_PROPERTIES_PATH}  "
+        f"({matched:,}/{V:,} SKUs matched)"
+    )
+    return out
+
+
+def get_cat_vocab(sku2idx: dict = None):
+    """
+    Load (cat2idx, cat_sku_pools) from cache or build them.
+
+    cat2idx       : raw_category_int -> dense_index (0=PAD, 1=RARE, 2..N)
+    cat_sku_pools : list[np.ndarray] indexed by dense_cat_idx;
+                    each entry is a sorted array of sku embedding indices
+                    (matches sku2idx values) for that category.
+
+    Requires cat2idx.joblib built by preprocess.py and sku2idx to be available.
+    """
+    if CAT_SKU_POOLS_PATH.exists() and CAT2IDX_PATH.exists():
+        cat2idx    = joblib.load(CAT2IDX_PATH)
+        cat_pools  = joblib.load(CAT_SKU_POOLS_PATH)
+        return cat2idx, cat_pools
+
+    if not CAT2IDX_PATH.exists():
+        raise RuntimeError(
+            f"cat2idx not found at {CAT2IDX_PATH}. Run preprocess.py first."
+        )
+    if sku2idx is None:
+        raise RuntimeError(
+            "sku2idx required to build cat_sku_pools but was not provided."
+        )
+
+    cat2idx = joblib.load(CAT2IDX_PATH)
+    n_categories = max(cat2idx.values()) + 1  # 0=PAD, 1=RARE, 2..N
+
+    from config import DATA_DIR
+    props = pl.read_parquet(
+        DATA_DIR / "product_properties.parquet",
+        columns=["sku", "category"],
+    )
+
+    # Build pools: dense_cat_idx -> sorted array of sku_idxs
+    cat_pools: list = [np.array([], dtype=np.int64) for _ in range(n_categories)]
+    rows = props.iter_rows(named=True)
+    pool_builder: defaultdict = defaultdict(list)
+    for row in rows:
+        raw_cat = row["category"]
+        raw_sku = row["sku"]
+        sku_idx = sku2idx.get(int(raw_sku))
+        if sku_idx is None:
+            continue
+        dense_cat = cat2idx.get(raw_cat, 1)   # unseen → RARE
+        pool_builder[dense_cat].append(sku_idx)
+
+    for dense_cat, idxs in pool_builder.items():
+        cat_pools[dense_cat] = np.array(sorted(set(idxs)), dtype=np.int64)
+
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    joblib.dump(cat_pools, CAT_SKU_POOLS_PATH)
+    print(
+        f"  cat_sku_pools saved -> {CAT_SKU_POOLS_PATH}  "
+        f"({n_categories} categories, "
+        f"{sum(len(p) for p in cat_pools):,} sku-category pairs)"
+    )
+    return cat2idx, cat_pools
+
+
 class SessionDataset(Dataset):
     """
     One item = one session.
@@ -176,12 +298,18 @@ class SessionDataset(Dataset):
             self._user_session_indices   = cached["user_session_indices"]
             self._session_pos_in_user    = cached["session_pos_in_user"]
             print(f"  {len(self._sessions):,} sessions loaded from cache")
+            # Load cat2idx for __getitem__ (may not exist for pre-hierarchical caches)
+            self._cat2idx: dict = joblib.load(CAT2IDX_PATH) if CAT2IDX_PATH.exists() else {}
             return
 
-        df = pl.read_parquet(
-            path,
-            columns=["client_id", "timestamp", "event_type", "session_id", "sku"],
-        ).sort(["session_id", "timestamp"])
+        # Detect which columns are present (category/price added by preprocess.py)
+        _schema_cols = pl.read_parquet(path, n_rows=1).columns
+        _load_cols   = ["client_id", "timestamp", "event_type", "session_id", "sku"]
+        _has_category = "category" in _schema_cols
+        if _has_category:
+            _load_cols += ["category"]
+
+        df = pl.read_parquet(path, columns=_load_cols).sort(["session_id", "timestamp"])
 
         # Session-start times for split filtering
         train_cut = pd.Timestamp(TRAIN_CUTOFF)
@@ -213,6 +341,12 @@ class SessionDataset(Dataset):
                 f"sku2idx cache not found at {SKU2IDX_PATH}. "
                 "Run SessionDataset(split='train') first to build the vocabulary."
             )
+
+        # Load (or build) category vocabulary if available
+        if CAT2IDX_PATH.exists():
+            self._cat2idx, _ = get_cat_vocab(sku2idx)
+        else:
+            self._cat2idx = {}
 
         #  Vectorised feature computation (stays in Rust/numpy), replaced with Polars because Pandas enjoys
         #  jumping back to Python code instead of staying in C
@@ -257,16 +391,30 @@ class SessionDataset(Dataset):
         bin_indices[first_event_mask & (delta_s_np == 0.0)] = 0
         df = df.with_columns(pl.Series("delta_bin", bin_indices))
 
+        # Map raw category ints -> dense indices via cat2idx (1=RARE for unknown/rare)
+        cat2idx = self._cat2idx
+        if _has_category and cat2idx:
+            raw_cats = df["category"].to_list()   # null for non-item rows
+            dense_cats = [
+                0 if c is None else cat2idx.get(c, 1)   # 0=PAD, missing→RARE(1)
+                for c in raw_cats
+            ]
+            df = df.with_columns(pl.Series("cat_idx", dense_cats, dtype=pl.Int32))
+        else:
+            df = df.with_columns(pl.lit(0).cast(pl.Int32).alias("cat_idx"))
+
         # Group into sessions and build tensor records
+        agg_exprs = [
+            pl.col("client_id").first().alias("client_id"),
+            pl.col("action_idx").alias("actions"),
+            pl.col("item_idx").alias("items"),
+            pl.col("delta_bin").alias("deltas"),
+            pl.col("cat_idx").alias("categories"),
+            pl.len().alias("n"),
+        ]
         sessions_df = (
             df.group_by("session_id", maintain_order=True)
-            .agg(
-                pl.col("client_id").first().alias("client_id"),
-                pl.col("action_idx").alias("actions"),
-                pl.col("item_idx").alias("items"),
-                pl.col("delta_bin").alias("deltas"),
-                pl.len().alias("n"),
-            )
+            .agg(agg_exprs)
             .filter(pl.col("n") >= min_length)
         )
         if max_sessions is not None:
@@ -279,18 +427,20 @@ class SessionDataset(Dataset):
         # conversion to tensors happens lazily in __getitem__.
         self._sessions: List[Dict] = []
         for row in sessions_df.iter_rows(named=True):
-            n_raw   = min(int(row["n"]), max_length - 1)   # reserve one slot for EOS
-            actions = row["actions"][-n_raw:] + [EOS_IDX]
-            items   = row["items"][-n_raw:]   + [0]
-            deltas  = row["deltas"][-n_raw:]  + [0]
-            n       = n_raw + 1
+            n_raw      = min(int(row["n"]), max_length - 1)   # reserve one slot for EOS
+            actions    = row["actions"][-n_raw:]    + [EOS_IDX]
+            items      = row["items"][-n_raw:]      + [0]
+            deltas     = row["deltas"][-n_raw:]     + [0]
+            categories = row["categories"][-n_raw:] + [0]
+            n          = n_raw + 1
 
             self._sessions.append({
-                "client_id": int(row["client_id"]),
-                "events":    np.array(actions, dtype=np.int64),
-                "items":     np.array(items,   dtype=np.int64),
-                "deltas":    np.array(deltas,  dtype=np.int64),
-                "length":    n,
+                "client_id":  int(row["client_id"]),
+                "events":     np.array(actions,    dtype=np.int64),
+                "items":      np.array(items,      dtype=np.int64),
+                "deltas":     np.array(deltas,     dtype=np.int64),
+                "categories": np.array(categories, dtype=np.int64),
+                "length":     n,
             })
 
         # Build per-user ordered index (session_id is time-based so order is preserved)
@@ -337,12 +487,15 @@ class SessionDataset(Dataset):
             history = None
 
         return {
-            "client_id": sess["client_id"],
-            "events":    torch.from_numpy(sess["events"]),
-            "items":     torch.from_numpy(sess["items"]),
-            "deltas":    torch.from_numpy(sess["deltas"]),
-            "length":    sess["length"],
-            "history":   history,
+            "client_id":  sess["client_id"],
+            "events":     torch.from_numpy(sess["events"]),
+            "items":      torch.from_numpy(sess["items"]),
+            "deltas":     torch.from_numpy(sess["deltas"]),
+            "categories": torch.from_numpy(
+                sess.get("categories", np.zeros(sess["length"], dtype=np.int64))
+            ),
+            "length":     sess["length"],
+            "history":    history,
         }
 
 
@@ -368,6 +521,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
     ev = torch.zeros(B, max_len, dtype=torch.long)
     it = torch.zeros(B, max_len, dtype=torch.long)
     dl = torch.zeros(B, max_len, dtype=torch.long)
+    ct = torch.zeros(B, max_len, dtype=torch.long)   # categories
     ln = torch.zeros(B, dtype=torch.long)
 
     for i, s in enumerate(batch):
@@ -375,6 +529,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
         ev[i, :L] = s["events"]
         it[i, :L] = s["items"]
         dl[i, :L] = s["deltas"]
+        ct[i, :L] = s["categories"]
         ln[i]     = L
 
     # Padding mask for transformer input (positions T-1 since forward shifts by 1)
@@ -410,6 +565,7 @@ def collate_fn(batch: List[Dict]) -> Dict:
         "events":               ev,
         "items":                it,
         "deltas":               dl,
+        "categories":           ct,
         "lengths":              ln,
         "tgt_key_padding_mask": pad_mask,
         "history":              history_out,

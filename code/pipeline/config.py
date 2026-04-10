@@ -6,10 +6,12 @@ import yaml
 DATA_DIR      = Path(__file__).parent.parent / "DATA"
 PIPELINE_DIR  = Path(__file__).parent
 OUTPUT_DIR    = PIPELINE_DIR / "output"
-CLEAN_PARQUET = OUTPUT_DIR / "events_clean.parquet"
-TEST_PARQUET  = OUTPUT_DIR / "events_test.parquet"
-MODEL_DIR     = OUTPUT_DIR / "models"
-SYNTH_DIR     = OUTPUT_DIR / "synthetic"
+CLEAN_PARQUET      = OUTPUT_DIR / "events_clean.parquet"
+TEST_PARQUET       = OUTPUT_DIR / "events_test.parquet"
+MODEL_DIR          = OUTPUT_DIR / "models"
+SYNTH_DIR          = OUTPUT_DIR / "synthetic"
+CAT2IDX_PATH       = OUTPUT_DIR / "cat2idx.joblib"
+CAT_SKU_POOLS_PATH = OUTPUT_DIR / "cat_sku_pools.joblib"
 
 # Load config.yaml
 _cfg = yaml.safe_load((PIPELINE_DIR / "config.yaml").read_text())
@@ -60,14 +62,33 @@ TRAIN_MAX_SESSIONS = _cfg["train_max_sessions"]   # None = full dataset
 TRAIN_NUM_WORKERS  = _cfg.get("train_num_workers", 4)
 
 #Item-head loss
-TRAIN_ITEM_LOSS     = _cfg.get("train_item_loss",     "full")    # "full" | "sampled"
+TRAIN_ITEM_LOSS     = _cfg.get("train_item_loss",     "full")    # "full" | "sampled" | "hierarchical"
 TRAIN_SAMPLED_K     = _cfg.get("train_sampled_k",     8192)
 TRAIN_SAMPLED_ALPHA = _cfg.get("train_sampled_alpha", 0.75)
+
+#Category head (hierarchical mode)
+CATEGORY_RARE_THRESHOLD = _cfg.get("category_rare_threshold", 5)
+
+def _load_n_categories() -> int:
+    """Load n_categories from cat2idx.joblib if available (built by preprocess.py)."""
+    if CAT2IDX_PATH.exists():
+        import joblib as _jl
+        cat2idx = _jl.load(CAT2IDX_PATH)
+        # indices: 0=PAD, 1=RARE, 2..N=regular; max_idx + 1 = n_categories
+        return max(cat2idx.values()) + 1 if cat2idx else 2
+    return 2   # fallback: PAD + RARE only (will fail at training if not rebuilt)
+
+N_CATEGORIES = _load_n_categories()
 
 # Derived: unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-_LOSS_TAG = "" if TRAIN_ITEM_LOSS == "full" else f"_ss{TRAIN_SAMPLED_K}"
+if TRAIN_ITEM_LOSS == "full":
+    _LOSS_TAG = ""
+elif TRAIN_ITEM_LOSS == "sampled":
+    _LOSS_TAG = f"_ss{TRAIN_SAMPLED_K}"
+else:  # hierarchical
+    _LOSS_TAG = "_hier"
 MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}{_LOSS_TAG}"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/  -one folder per variant
 

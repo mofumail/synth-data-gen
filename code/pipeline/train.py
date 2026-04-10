@@ -33,8 +33,12 @@ from config import (
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
     TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
     TRAIN_ITEM_LOSS, TRAIN_SAMPLED_K, TRAIN_SAMPLED_ALPHA,
+    N_CATEGORIES, CAT2IDX_PATH,
 )
-from ingestion.dataset import InteractionGenerator, ensure_vocab_stats
+from ingestion.dataset import (
+    InteractionGenerator, ensure_vocab_stats,
+    get_cat_vocab, get_sku2idx, get_sku_properties,
+)
 from simulation.generator.session_transformer import (
     SessionTransformer,
     N_ACTIONS,
@@ -60,7 +64,9 @@ def train():
           f"lr={TRAIN_LR}, max_sessions={TRAIN_MAX_SESSIONS}")
     print(f"Item loss: {TRAIN_ITEM_LOSS}"
           + (f" (K={TRAIN_SAMPLED_K}, alpha={TRAIN_SAMPLED_ALPHA})"
-             if TRAIN_ITEM_LOSS == "sampled" else ""))
+             if TRAIN_ITEM_LOSS in ("sampled", "hierarchical") else "")
+          + (f" | n_categories={N_CATEGORIES}"
+             if TRAIN_ITEM_LOSS == "hierarchical" else ""))
 
     run = wandb.init(
         project="thesis-session-transformer",
@@ -81,6 +87,7 @@ def train():
             "item_loss":       TRAIN_ITEM_LOSS,
             "sampled_k":       TRAIN_SAMPLED_K,
             "sampled_alpha":   TRAIN_SAMPLED_ALPHA,
+            "n_categories":    N_CATEGORIES if TRAIN_ITEM_LOSS == "hierarchical" else 0,
         },
     )
 
@@ -110,6 +117,33 @@ def train():
     )
     print(f"  {len(val_gen.dataset):,} val sessions | {len(val_gen):,} batches")
 
+    # Category vocab (hierarchical mode): load cat_sku_pools as GPU tensors.
+    # These are used to build the masked softmax so the item-head loss normalizes
+    # only over SKUs in the target category (the whole point of the factorization).
+    cat_sku_pools_tensors = None
+    if TRAIN_ITEM_LOSS == "hierarchical":
+        if not CAT2IDX_PATH.exists():
+            raise RuntimeError(
+                "cat2idx.joblib not found. Run preprocess.py first to build category vocab."
+            )
+        sku2idx = get_sku2idx()
+        _, cat_pools_np = get_cat_vocab(sku2idx)   # list[np.ndarray], indexed by dense cat_idx
+        cat_sku_pools_tensors = [
+            torch.as_tensor(p, dtype=torch.long, device=device) for p in cat_pools_np
+        ]
+        nonempty = sum(1 for p in cat_sku_pools_tensors if p.numel() > 0)
+        avg_pool = sum(p.numel() for p in cat_sku_pools_tensors) / max(nonempty, 1)
+        print(f"  Hierarchical mode: {N_CATEGORIES} categories "
+              f"({nonempty} non-empty pools, avg pool size {avg_pool:.0f})")
+
+    # SKU property tables (price + quantized name) — used as input-side features
+    # in the encoder. Looked up by SKU index inside the model.
+    sku_props = None
+    if TRAIN_ITEM_LOSS == "hierarchical":
+        _sku2idx_for_props = get_sku2idx()
+        sku_props = get_sku_properties(_sku2idx_for_props)
+        print(f"  SKU aux features: price + name (built/loaded from sku_properties.joblib)")
+
     # Model
     model = SessionTransformer(
         vocab_size=VOCAB_K,
@@ -119,6 +153,9 @@ def train():
         n_temporal_bins=N_TEMPORAL_BINS,
         window_H=HISTORY_WINDOW,
         valid_transitions={},     # mask not used during training
+        n_categories=N_CATEGORIES if TRAIN_ITEM_LOSS == "hierarchical" else 0,
+        sku_price_table=sku_props["price"] if sku_props else None,
+        sku_name_table =sku_props["name"]  if sku_props else None,
     ).to(device)
     # Capture the uncompiled item_head BEFORE torch.compile so sampled_logits()
     # reaches the real module rather than going through the OptimizedModule wrapper.
@@ -128,9 +165,7 @@ def train():
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {n_params:,}")
 
-    # Sampled-softmax sampler: α-smoothed unigram proposal Q(w) ∝ U(w)^alpha.
-    # Built once at train start, held as train-loop locals (not registered buffers,
-    # so they don't leak into checkpoints or the inference path).
+    # Sampled-softmax sampler (only for "sampled" mode).
     if TRAIN_ITEM_LOSS == "sampled":
         counts_np = ensure_vocab_stats()                       # [V] int64
         counts = torch.from_numpy(counts_np).to(device)
@@ -154,18 +189,19 @@ def train():
 
     for epoch in range(1, TRAIN_EPOCHS + 1):
         model.train()
-        epoch_action = epoch_item = epoch_temporal = 0.0
+        epoch_action = epoch_item = epoch_temporal = epoch_category = 0.0
         epoch_batches = 0
         t0 = time.time()
 
         train_bar = tqdm(gen.loader, desc=f"Epoch {epoch}/{TRAIN_EPOCHS} train", leave=False)
         for batch in train_bar:
-            events   = batch["events"].to(device)               # [B, T]
-            items    = batch["items"].to(device)                # [B, T]
-            deltas   = batch["deltas"].to(device)               # [B, T]
-            pad_mask = batch["tgt_key_padding_mask"].to(device) # [B, T-1]
-            lengths  = batch["lengths"]                         # [B]
-            history  = batch.get("history")                     # dict or None
+            events     = batch["events"].to(device)               # [B, T]
+            items      = batch["items"].to(device)                # [B, T]
+            deltas     = batch["deltas"].to(device)               # [B, T]
+            categories = batch["categories"].to(device)           # [B, T]
+            pad_mask   = batch["tgt_key_padding_mask"].to(device) # [B, T-1]
+            lengths    = batch["lengths"]                         # [B]
+            history    = batch.get("history")                     # dict or None
             if history is not None:
                 history = {k: v.to(device) for k, v in history.items()}
 
@@ -173,9 +209,10 @@ def train():
             T_out = T - 1
 
             # Targets
-            tgt_actions = events[:, 1:]   # [B, T-1]
-            tgt_items   = items[:, 1:]    # [B, T-1]
-            tgt_deltas  = deltas[:, 1:]   # [B, T-1]
+            tgt_actions    = events[:, 1:]       # [B, T-1]
+            tgt_items      = items[:, 1:]        # [B, T-1]
+            tgt_deltas     = deltas[:, 1:]       # [B, T-1]
+            tgt_categories = categories[:, 1:]  # [B, T-1]
 
             # Valid position mask (real, non-padded targets)
             valid = build_target_mask(lengths, T_out, device)  # [B, T-1]
@@ -186,55 +223,81 @@ def train():
                 tgt_is_item |= (tgt_actions == idx)
             item_valid = valid & tgt_is_item  # [B, T-1]
 
-            # Forward (teacher-forced). In "ctx" mode item_logits is None and
-            # item_ctx is (h_item, tgt_e_item) for the sampled-softmax path.
-            _fwd_mode = "ctx" if TRAIN_ITEM_LOSS == "sampled" else "full"
+            # Forward (teacher-forced).
+            # sampled/hierarchical use "ctx" to get (h_item, tgt_e_item, tgt_c_item)
+            # back and skip the full [M, V] projection; full mode keeps it.
+            _fwd_mode = "ctx" if TRAIN_ITEM_LOSS in ("sampled", "hierarchical") else "full"
+
             with autocast("cuda"):
-                action_logits, item_logits, temporal_logits, item_ctx = model(
-                    events, items, deltas,
+                action_logits, category_logits, item_logits, temporal_logits, item_ctx = model(
+                    events, items, deltas, categories,
                     history=history,
                     tgt_key_padding_mask=pad_mask,
                     item_mask=item_valid,
                     item_head_mode=_fwd_mode,
                 )
-                # action_logits:   [B, T-1, n_actions]
-                # item_logits:     [M, vocab_size] if "full", else None
-                # temporal_logits: [B, T-1, n_bins]
-                # item_ctx:        (h_item, tgt_e_item) if "ctx", else None
 
                 # Action loss
-                a_logits = action_logits[valid]          # [N, N_ACTIONS]
-                a_tgt    = tgt_actions[valid]            # [N]
+                a_logits    = action_logits[valid]          # [N, N_ACTIONS]
+                a_tgt       = tgt_actions[valid]            # [N]
                 action_loss = F.cross_entropy(a_logits, a_tgt)
 
-                # Item loss: full softmax or stratified sampled softmax
+                # Category loss (hierarchical only)
+                category_loss = torch.zeros(1, device=device).squeeze()
+                if TRAIN_ITEM_LOSS == "hierarchical" and item_valid.any() and category_logits is not None:
+                    c_tgt         = tgt_categories[item_valid]   # [M]
+                    category_loss = F.cross_entropy(category_logits, c_tgt)
+
+                # Item loss
                 if item_valid.any():
-                    i_tgt = tgt_items[item_valid]        # [M]
+                    i_tgt = tgt_items[item_valid]            # [M]
                     if TRAIN_ITEM_LOSS == "sampled":
-                        h_item, tgt_e_item = item_ctx
-                        # Shared negatives per step: O(K) vs O(M*K) with negligible
-                        # statistical penalty because distinct h_t's stratify the noise.
-                        neg_ids = torch.multinomial(
-                            probs, TRAIN_SAMPLED_K, replacement=True
-                        )                                 # [K]
-                        sampled = item_head.sampled_logits(
-                            h_item, tgt_e_item, i_tgt, neg_ids, log_q
-                        )                                 # [M, 1+K]
-                        zeros = torch.zeros(
-                            sampled.size(0), dtype=torch.long, device=device
-                        )
+                        h_item, tgt_e_item, _ = item_ctx
+                        neg_ids = torch.multinomial(probs, TRAIN_SAMPLED_K, replacement=True)
+                        sampled = item_head.sampled_logits(h_item, tgt_e_item, i_tgt, neg_ids, log_q)
+                        zeros   = torch.zeros(sampled.size(0), dtype=torch.long, device=device)
                         item_loss = F.cross_entropy(sampled, zeros)
+                    elif TRAIN_ITEM_LOSS == "hierarchical":
+                        # Within-category CE computed directly from the conditioning
+                        # vector: never materializes the full [M, V] projection.
+                        # cond = h + action_emb + category_emb; per category slice
+                        # fc.weight[pool] and project only onto pool columns.
+                        h_item, tgt_e_item, tgt_c_item = item_ctx
+                        cond = (
+                            h_item
+                            + item_head.action_cond(tgt_e_item)
+                            + item_head.category_cond(tgt_c_item)
+                        )                                                       # [M, d]
+                        W = item_head.fc.weight                                  # [V, d]
+                        b = item_head.fc.bias                                    # [V]
+                        loss_sum = torch.zeros((), device=device)
+                        total_m  = 0
+                        for cat_idx in torch.unique(tgt_c_item).tolist():
+                            row_ids = (tgt_c_item == cat_idx).nonzero(as_tuple=False).squeeze(-1)
+                            pool    = cat_sku_pools_tensors[cat_idx]
+                            if pool.numel() == 0:
+                                continue
+                            w_pool   = W.index_select(0, pool)                  # [K, d]
+                            b_pool   = b.index_select(0, pool)                  # [K]
+                            sub_logits = cond[row_ids] @ w_pool.t() + b_pool     # [R, K]
+                            local_tgt  = torch.searchsorted(pool, i_tgt[row_ids])
+                            local_tgt  = local_tgt.clamp(max=pool.numel() - 1)
+                            loss_sum  = loss_sum + F.cross_entropy(
+                                sub_logits, local_tgt, reduction="sum"
+                            )
+                            total_m  += row_ids.numel()
+                        item_loss = loss_sum / max(total_m, 1)
                     else:
                         item_loss = F.cross_entropy(item_logits, i_tgt)
                 else:
                     item_loss = torch.zeros(1, device=device).squeeze()
 
                 # Temporal loss
-                d_logits = temporal_logits[valid]        # [N, N_BINS]
-                d_tgt    = tgt_deltas[valid]             # [N]
+                d_logits      = temporal_logits[valid]       # [N, N_BINS]
+                d_tgt         = tgt_deltas[valid]            # [N]
                 temporal_loss = F.cross_entropy(d_logits, d_tgt)
 
-                loss = action_loss + item_loss + temporal_loss
+                loss = action_loss + category_loss + item_loss + temporal_loss
 
             optimizer.zero_grad()
             scaler.scale(loss).backward()
@@ -245,20 +308,24 @@ def train():
             scheduler.step()
 
             epoch_action   += action_loss.item()
+            epoch_category += category_loss.item()
             epoch_item     += item_loss.item()
             epoch_temporal += temporal_loss.item()
             epoch_batches  += 1
             global_step    += 1
 
-            train_bar.set_postfix(
+            pf = dict(
                 act=f"{epoch_action/epoch_batches:.3f}",
                 item=f"{epoch_item/epoch_batches:.3f}",
                 temp=f"{epoch_temporal/epoch_batches:.3f}",
             )
+            if TRAIN_ITEM_LOSS == "hierarchical":
+                pf["cat"] = f"{epoch_category/epoch_batches:.3f}"
+            train_bar.set_postfix(**pf)
 
             # Log every 100 steps to keep W&B traffic low
             if global_step % 100 == 0:
-                wandb.log({
+                log_dict = {
                     "train/action_loss":   action_loss.item(),
                     "train/item_loss":     item_loss.item(),
                     "train/temporal_loss": temporal_loss.item(),
@@ -266,16 +333,22 @@ def train():
                     "train/lr":            scheduler.get_last_lr()[0],
                     "train/grad_norm":     grad_norm,
                     "epoch": epoch,
-                }, step=global_step)
+                }
+                if TRAIN_ITEM_LOSS == "hierarchical":
+                    log_dict["train/category_loss"] = category_loss.item()
+                wandb.log(log_dict, step=global_step)
 
-        elapsed  = time.time() - t0
+        elapsed      = time.time() - t0
         avg_action   = epoch_action   / epoch_batches
+        avg_category = epoch_category / epoch_batches
         avg_item     = epoch_item     / epoch_batches
         avg_temporal = epoch_temporal / epoch_batches
-        avg_loss     = avg_action + avg_item + avg_temporal
+        avg_loss     = avg_action + avg_category + avg_item + avg_temporal
+        cat_str = f"cat={avg_category:.4f} " if TRAIN_ITEM_LOSS == "hierarchical" else ""
         print(
             f"\nEpoch {epoch}/{TRAIN_EPOCHS} | "
             f"action={avg_action:.4f} "
+            f"{cat_str}"
             f"item={avg_item:.4f} "
             f"temporal={avg_temporal:.4f} "
             f"| total={avg_loss:.4f} | {elapsed:.1f}s"
@@ -283,26 +356,28 @@ def train():
 
         # Validation
         model.eval()
-        val_action = val_item = val_temporal = 0.0
+        val_action = val_category = val_item = val_temporal = 0.0
         val_batches = 0
         with torch.no_grad():
             val_bar = tqdm(val_gen.loader, desc=f"Epoch {epoch}/{TRAIN_EPOCHS} val  ", leave=False)
             for batch in val_bar:
-                events   = batch["events"].to(device)
-                items    = batch["items"].to(device)
-                deltas   = batch["deltas"].to(device)
-                pad_mask = batch["tgt_key_padding_mask"].to(device)
-                lengths  = batch["lengths"]
-                history  = batch.get("history")
+                events     = batch["events"].to(device)
+                items      = batch["items"].to(device)
+                deltas     = batch["deltas"].to(device)
+                categories = batch["categories"].to(device)
+                pad_mask   = batch["tgt_key_padding_mask"].to(device)
+                lengths    = batch["lengths"]
+                history    = batch.get("history")
                 if history is not None:
                     history = {k: v.to(device) for k, v in history.items()}
 
                 B, T  = events.shape
                 T_out = T - 1
-                tgt_actions = events[:, 1:]
-                tgt_items   = items[:, 1:]
-                tgt_deltas  = deltas[:, 1:]
-                valid       = build_target_mask(lengths, T_out, device)
+                tgt_actions    = events[:, 1:]
+                tgt_items      = items[:, 1:]
+                tgt_deltas     = deltas[:, 1:]
+                tgt_categories = categories[:, 1:]
+                valid          = build_target_mask(lengths, T_out, device)
 
                 tgt_is_item = torch.zeros_like(tgt_actions, dtype=torch.bool)
                 for idx in ITEM_BEARING_IDX:
@@ -310,45 +385,52 @@ def train():
                 item_valid = valid & tgt_is_item
 
                 with autocast("cuda"):
-                    # Val always uses full CE for apples-to-apples comparison
-                    # against iter1, regardless of TRAIN_ITEM_LOSS.
-                    action_logits, item_logits, temporal_logits, _ = model(
-                        events, items, deltas,
+                    # Val always uses full CE for item loss (apples-to-apples comparison).
+                    action_logits, category_logits, item_logits, temporal_logits, _ = model(
+                        events, items, deltas, categories,
                         history=history,
                         tgt_key_padding_mask=pad_mask,
                         item_mask=item_valid,
                         item_head_mode="full",
                     )
-                    a_logits = action_logits[valid]
+                    a_logits        = action_logits[valid]
                     val_action_loss = F.cross_entropy(a_logits, tgt_actions[valid])
+
+                    val_cat_loss = torch.zeros(1, device=device).squeeze()
+                    if TRAIN_ITEM_LOSS == "hierarchical" and item_valid.any() and category_logits is not None:
+                        val_cat_loss = F.cross_entropy(category_logits, tgt_categories[item_valid])
 
                     if item_valid.any():
                         val_item_loss = F.cross_entropy(item_logits, tgt_items[item_valid])
                     else:
                         val_item_loss = torch.zeros(1, device=device).squeeze()
 
-                    d_logits = temporal_logits[valid]
+                    d_logits          = temporal_logits[valid]
                     val_temporal_loss = F.cross_entropy(d_logits, tgt_deltas[valid])
 
                 val_action   += val_action_loss.item()
+                val_category += val_cat_loss.item()
                 val_item     += val_item_loss.item()
                 val_temporal += val_temporal_loss.item()
                 val_batches  += 1
 
         val_avg_action   = val_action   / val_batches
+        val_avg_category = val_category / val_batches
         val_avg_item     = val_item     / val_batches
         val_avg_temporal = val_temporal / val_batches
-        val_loss         = val_avg_action + val_avg_item + val_avg_temporal
+        val_loss         = val_avg_action + val_avg_category + val_avg_item + val_avg_temporal
+        val_cat_str = f"cat={val_avg_category:.4f} " if TRAIN_ITEM_LOSS == "hierarchical" else ""
         print(
             f"Val   {epoch}/{TRAIN_EPOCHS} | "
             f"action={val_avg_action:.4f} "
+            f"{val_cat_str}"
             f"item={val_avg_item:.4f} "
             f"temporal={val_avg_temporal:.4f} "
             f"| total={val_loss:.4f}"
         )
 
-        is_best = val_loss < best_loss
-        wandb.log({
+        is_best  = val_loss < best_loss
+        log_epoch = {
             "epoch": epoch,
             # Epoch-level train averages
             "train/epoch_action_loss":   avg_action,
@@ -362,7 +444,11 @@ def train():
             "val/temporal_loss":         val_avg_temporal,
             "val/total_loss":            val_loss,
             "val/is_best":               int(is_best),
-        }, step=global_step)
+        }
+        if TRAIN_ITEM_LOSS == "hierarchical":
+            log_epoch["train/epoch_category_loss"] = avg_category
+            log_epoch["val/category_loss"]         = val_avg_category
+        wandb.log(log_epoch, step=global_step)
 
         if is_best:
             best_loss = val_loss

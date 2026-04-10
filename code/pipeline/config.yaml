@@ -25,7 +25,7 @@ mongo_uri: "mongodb://localhost:27017"
 mongo_db:  "synerise"
 
 # Training
-train_epochs:       30
+train_epochs:       1
 train_batch_size:   256
 train_max_length:   50         # max events per session (including EOS)
 train_lr:           0.0003     # AdamW learning rate
@@ -36,12 +36,15 @@ train_max_sessions: null       # null = use all sessions; set int for smoke test
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
 
 # Item-head loss
-train_item_loss:      sampled   # "full" (iter1-style V-way CE) | "sampled" (stratified sampled softmax)
-train_sampled_k:      8192      # number of shared negatives per step for sampled softmax
-train_sampled_alpha:  0.75      # unigram smoothing: Q(w) ∝ U(w)^alpha (word2vec convention)
+train_item_loss:      hierarchical   # "full" | "sampled" | "hierarchical"
+train_sampled_k:      8192           # only used for "sampled" mode; ignored by "hierarchical"
+train_sampled_alpha:  0.75           # unigram smoothing: Q(w) ∝ U(w)^alpha (word2vec convention)
+
+# Category head (hierarchical mode)
+category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token
 
 # Evaluation
-eval_model: session_transformer_d128_l4_h4_ss8192   # model subdir to load for evaluate.py
+eval_model: session_transformer_d128_l4_h4_hier   # model subdir to load for evaluate.py
                                              # change this to switch which checkpoint gets evaluated
 
 # GRU4Rec downstream evaluator
