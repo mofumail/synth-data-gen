@@ -61,12 +61,7 @@ TRAIN_N_HEADS      = _cfg["train_n_heads"]
 TRAIN_MAX_SESSIONS = _cfg["train_max_sessions"]   # None = full dataset
 TRAIN_NUM_WORKERS  = _cfg.get("train_num_workers", 4)
 
-#Item-head loss
-TRAIN_ITEM_LOSS     = _cfg.get("train_item_loss",     "full")    # "full" | "sampled" | "hierarchical"
-TRAIN_SAMPLED_K     = _cfg.get("train_sampled_k",     8192)
-TRAIN_SAMPLED_ALPHA = _cfg.get("train_sampled_alpha", 0.75)
-
-#Category head (hierarchical mode)
+#Category head (hierarchical item loss)
 CATEGORY_RARE_THRESHOLD = _cfg.get("category_rare_threshold", 5)
 
 def _load_n_categories() -> int:
@@ -83,13 +78,7 @@ N_CATEGORIES = _load_n_categories()
 # Derived: unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-if TRAIN_ITEM_LOSS == "full":
-    _LOSS_TAG = ""
-elif TRAIN_ITEM_LOSS == "sampled":
-    _LOSS_TAG = f"_ss{TRAIN_SAMPLED_K}"
-else:  # hierarchical
-    _LOSS_TAG = "_hier"
-MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}{_LOSS_TAG}"
+MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_hier"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/  -one folder per variant
 
 #Evaluation model (independent of training config)

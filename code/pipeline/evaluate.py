@@ -34,9 +34,8 @@ import argparse
 import time
 import torch
 from collections import defaultdict
-from pathlib import Path
 
-from config import MODEL_DIR, MODEL_NAME, MODEL_SUBDIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR
+from config import MODEL_DIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR
 from evaluation.fidelity import FidelityEvaluator
 from evaluation.orchestrator import EvaluationOrchestrator
 from evaluation.reference import RealDataLoader, ReferenceProfiler, ReferenceStore

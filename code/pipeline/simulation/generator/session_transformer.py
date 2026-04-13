@@ -15,7 +15,6 @@ Inference : cascaded sampling, action -> item -> temporal.
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,9 +23,8 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch import Tensor
 
-from config import N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S, VOCAB_K, N_CATEGORIES
+from config import N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S
 
 # Action vocabulary, matches ALL_EVENT_TYPES + EOS
 ACTION_TYPES = [
@@ -64,62 +62,6 @@ def bin_to_seconds(bin_idx: int) -> float:
 
 # Precomputed lookup: avoids np.sqrt on every generated event
 BIN_SECONDS_LUT: List[float] = [bin_to_seconds(i) for i in range(N_TEMPORAL_BINS)]
-
-
-# TransitionConstraintMask, this should be removed and maybe learned innately
-
-class TransitionConstraintMask:
-    """
-    Pre-sampling mask: zeroes logits for illegal next actions.
-    Applied inside ActionHead at inference time.
-
-    valid_transitions : action_str ->set[action_str]
-                        EOS is always allowed from any state.
-
-    Stores a [N_ACTIONS+1, N_ACTIONS] matrix where row N_ACTIONS is the
-    unconstrained row (all ones), used when last_action_idx is None / -1.
-    """
-
-    def __init__(self, valid_transitions: dict):
-        # Default: all actions allowed (row = all ones)
-        mat = torch.ones(N_ACTIONS + 1, N_ACTIONS)
-        for src_str, tgt_set in valid_transitions.items():
-            src_idx = ACTION2IDX.get(src_str)
-            if src_idx is None:
-                continue
-            row = torch.zeros(N_ACTIONS)
-            for tgt_str in tgt_set:
-                tgt_idx = ACTION2IDX.get(tgt_str)
-                if tgt_idx is not None:
-                    row[tgt_idx] = 1.0
-            row[EOS_IDX] = 1.0   # always allow EOS
-            mat[src_idx] = row
-        self._allowed_matrix = mat   # [N_ACTIONS+1, N_ACTIONS]
-
-    def apply(
-        self,
-        logits: torch.Tensor,           # [..., N_ACTIONS]
-        last_action_idx: Optional[int],
-    ) -> torch.Tensor:
-        """Return logits with -inf at disallowed positions. No-op if no constraint."""
-        if last_action_idx is None:
-            return logits
-        row = self._allowed_matrix[last_action_idx].bool().to(logits.device)
-        return logits.masked_fill(~row, float("-inf"))
-
-    def apply_batch(
-        self,
-        logits: torch.Tensor,           # [B, N_ACTIONS]
-        last_action_idxs: torch.Tensor, # [B] long --1 means unconstrained
-    ) -> torch.Tensor:
-        """Vectorised batch version. -1 in last_action_idxs ->no constraint."""
-        idx = torch.where(
-            last_action_idxs < 0,
-            torch.full_like(last_action_idxs, N_ACTIONS),   # unconstrained row
-            last_action_idxs,
-        )
-        allowed = self._allowed_matrix.to(logits.device)[idx].bool()  # [B, N_ACTIONS]
-        return logits.masked_fill(~allowed, float("-inf"))
 
 
 # CrossSessionHistory
@@ -160,24 +102,14 @@ class CrossSessionHistory(nn.Module):
 # Prediction heads
 
 class ActionHead(nn.Module):
-    """
-    Predicts next action (5 event types + EOS).
-    TransitionConstraintMask is applied at inference time (last_action_idx != None).
-    During training last_action_idx is None ->no masking ->standard cross-entropy.
-    """
+    """Predicts next action (5 event types + EOS)."""
 
-    def __init__(self, d_model: int, n_actions: int, valid_transitions: dict):
+    def __init__(self, d_model: int, n_actions: int):
         super().__init__()
-        self.fc              = nn.Linear(d_model, n_actions)
-        self.constraint_mask = TransitionConstraintMask(valid_transitions)
+        self.fc = nn.Linear(d_model, n_actions)
 
-    def forward(
-        self,
-        h_t: torch.Tensor,                      # [B, d_model] or [B, T, d_model]
-        last_action_idx: Optional[int] = None,  # scalar; None during training
-    ) -> torch.Tensor:                           # [B, n_actions] or [B, T, n_actions]
-        logits = self.fc(h_t)
-        return self.constraint_mask.apply(logits, last_action_idx)
+    def forward(self, h_t: torch.Tensor) -> torch.Tensor:
+        return self.fc(h_t)
 
 
 class CategoryHead(nn.Module):
@@ -236,52 +168,39 @@ class ItemHead(nn.Module):
             cond = cond + self.category_cond(category_t)
         return self.fc(cond)
 
-    def sampled_logits(
+    def register_sku_cat_map(
+        self, cat_sku_pools: List[torch.Tensor], vocab_size: int,
+    ) -> None:
+        """
+        Build and register a [V] tensor mapping each SKU embedding index to its
+        dense category index.  SKUs not in any pool get category 0 (PAD), which
+        will never match a real target category (real cats are >= 1).
+        """
+        sku_cat = torch.zeros(vocab_size, dtype=torch.long)
+        for cat_idx, pool in enumerate(cat_sku_pools):
+            if pool.numel() > 0:
+                sku_cat[pool.cpu().long()] = cat_idx
+        self.register_buffer("sku_cat", sku_cat.to(self.fc.weight.device), persistent=False)
+
+    def hierarchical_loss(
         self,
         h_t: torch.Tensor,            # [M, d_model]
         action_t: torch.Tensor,       # [M]
-        positive_ids: torch.Tensor,   # [M]    long, true targets
-        negative_ids: torch.Tensor,   # [K]    long, shared negatives for this step
-        log_q: torch.Tensor,          # [V]    fp32, log of the proposal Q(w) ∝ U(w)^alpha
-        category_t: Optional[torch.Tensor] = None,  # [M] for hierarchical mode
-    ) -> torch.Tensor:                # [M, 1 + K]  (positive is column 0)
+        category_t: torch.Tensor,     # [M] dense cat indices
+        sku_ids: torch.Tensor,        # [M] target sku indices (global)
+    ) -> torch.Tensor:
         """
-        Sampled-softmax logits with log-Q correction and accidental-hit masking.
-
-        Target class for the downstream CE is always column 0 (the positive).
-        Shared negatives: one draw per step is ~100x faster than per-example and
-        is statistically fine because the M positives stratify the shared noise
-        through their distinct h_t vectors.
+        Vectorized masked cross-entropy: compute full logits over the entire
+        vocab, mask out-of-category items to -inf, then standard CE with global
+        SKU targets.  Softmax normalizes only over in-category items.
         """
-        cond = h_t + self.action_cond(action_t)           # [M, d_model]
-        if self.category_cond is not None and category_t is not None:
+        cond = h_t + self.action_cond(action_t)
+        if self.category_cond is not None:
             cond = cond + self.category_cond(category_t)
-        W = self.fc.weight                                # [V, d_model]
-        b = self.fc.bias                                  # [V]
-
-        w_pos = W.index_select(0, positive_ids)           # [M, d_model]
-        b_pos = b.index_select(0, positive_ids)           # [M]
-        w_neg = W.index_select(0, negative_ids)           # [K, d_model]
-        b_neg = b.index_select(0, negative_ids)           # [K]
-
-        # Positive logit per row: (cond_m . w_pos_m) + b_pos_m
-        logit_pos = (cond * w_pos).sum(dim=-1) + b_pos    # [M]
-        # Negative logits: same negatives shared across rows
-        logit_neg = cond @ w_neg.t() + b_neg              # [M, K]
-
-        # log-Q correction: s'(w) = s(w) - log Q(w). log_q is fp32; subtraction
-        # promotes fp16 logits to fp32 automatically, which CE is happy with.
-        logit_pos = logit_pos - log_q.index_select(0, positive_ids)
-        logit_neg = logit_neg - log_q.index_select(0, negative_ids).unsqueeze(0)
-
-        # Accidental-hit masking: wherever a sampled negative equals the row's
-        # positive, suppress it from the softmax. Per-row mask because each row
-        # has a different positive.
-        hit = negative_ids.unsqueeze(0).eq(positive_ids.unsqueeze(1))   # [M, K]
-        logit_neg = logit_neg.masked_fill(hit, torch.finfo(logit_neg.dtype).min)
-
-        return torch.cat([logit_pos.unsqueeze(1), logit_neg], dim=1)    # [M, 1+K]
-
+        logits = self.fc(cond)                                           # [M, V]
+        mask = self.sku_cat.unsqueeze(0) == category_t.unsqueeze(1)      # [M, V]
+        logits = logits.masked_fill(~mask, float('-inf'))
+        return F.cross_entropy(logits, sku_ids)
 
 class TemporalHead(nn.Module):
     """
@@ -335,7 +254,6 @@ class SessionTransformer(nn.Module):
     n_heads           : attention heads (default 8)
     n_temporal_bins   : delta_t bins (default 64)
     window_H          : cross-session history window size
-    valid_transitions : dict action_str ->set[action_str] for constraint mask
     """
 
     def __init__(
@@ -347,7 +265,6 @@ class SessionTransformer(nn.Module):
         n_heads: int = 8,
         n_temporal_bins: int = N_TEMPORAL_BINS,
         window_H: int = 50,
-        valid_transitions: dict = None,
         n_categories: int = 0,    # 0 = no category head (backward-compat)
         sku_price_table: Optional[np.ndarray] = None,  # [V] long, 0=PAD, real=bucket+1
         sku_name_table:  Optional[np.ndarray] = None,  # [V, 16] long, 0=PAD
@@ -415,7 +332,7 @@ class SessionTransformer(nn.Module):
         self.history = CrossSessionHistory(window_H, d_model, n_heads=n_heads)
 
         # Prediction heads
-        self.action_head   = ActionHead(d_model, n_actions, valid_transitions or {})
+        self.action_head   = ActionHead(d_model, n_actions)
         self.category_head = CategoryHead(d_model, n_categories) if n_categories > 0 else None
         self.item_head     = ItemHead(d_model, vocab_size, n_categories=n_categories, top_k=100)
         self.temporal_head = TemporalHead(d_model, n_temporal_bins)
@@ -460,7 +377,6 @@ class SessionTransformer(nn.Module):
         history: Optional[dict] = None,               # keys: events/items/deltas ->[B, H]
         tgt_key_padding_mask: Optional[torch.Tensor] = None,  # [B, T-1] True=pad
         item_mask: Optional[torch.Tensor] = None,     # [B, T-1] bool -item positions only
-        item_head_mode: str = "full",                 # "full" | "ctx" | "hier"
     ):
         """
         Teacher-forced training pass.
@@ -468,19 +384,11 @@ class SessionTransformer(nn.Module):
         Input tokens  : t = 0 .. T-2
         Target tokens : t = 1 .. T-1   (shifted by 1)
 
-        Returns (5-tuple):
+        Returns (4-tuple):
         action_logits   : [B, T-1, n_actions]
-        category_logits : [M, n_categories] at item-bearing positions, or None
-        item_logits     : [M, vocab_size] if "full"; None if "ctx"/"hier"
+        category_logits : [M, n_categories] at item-bearing positions
         temporal_logits : [B, T-1, n_bins]
-        item_ctx        : (h_item, tgt_e_item, tgt_c_item) if "hier"/"ctx"; else None
-                          tgt_c_item is None when category head is not active.
-
-        item_head_mode:
-            "full"  - full V-way CE; used for val and non-sampled training.
-            "ctx"   - return (h_item, tgt_e_item, None) for global sampled softmax.
-            "hier"  - return (h_item, tgt_e_item, tgt_c_item) for within-category
-                      sampled softmax; requires categories != None.
+        item_ctx        : (h_item, tgt_e_item, tgt_c_item) for hierarchical loss
         """
         in_e  = events[:, :-1]   # [B, T-1] -model input
         in_i  = items[:, :-1]
@@ -498,10 +406,7 @@ class SessionTransformer(nn.Module):
 
         memory = self._encode_history(history, B, device)  # [B, >=1, d_model]
 
-        # Newer torch requires an explicit tgt_mask when tgt_is_causal=True
-        # (otherwise F.multi_head_attention_forward raises under torch.compile).
         tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device)
-
         h = self.decoder(
             x, memory,
             tgt_mask=tgt_mask,
@@ -515,157 +420,16 @@ class SessionTransformer(nn.Module):
         tgt_item_emb = self.item_emb(tgt_i)                     # [B, T, d_model]
         temporal_logits = self.temporal_head(h, tgt_e, tgt_item_emb)  # [B, T, n_bins]
 
-        category_logits = None
-        item_logits     = None
-        item_ctx        = None
+        # Sparse: only compute item/category heads at item-bearing positions
+        h_item     = h[item_mask]        # [M, d_model]
+        tgt_e_item = tgt_e[item_mask]    # [M]
+        tgt_c_item = tgt_c[item_mask]    # [M]
+        category_logits = self.category_head(h_item, tgt_e_item)  # [M, n_cats]
+        item_ctx = (h_item, tgt_e_item, tgt_c_item)
 
-        if item_mask is not None:
-            # Sparse: only compute heads at item-bearing positions -> [M, ...]
-            h_item      = h[item_mask]       # [M, d_model]
-            tgt_e_item  = tgt_e[item_mask]   # [M]
-            tgt_c_item  = tgt_c[item_mask] if tgt_c is not None else None  # [M]
-
-            # Category head (always runs when available, regardless of item_head_mode)
-            if self.category_head is not None:
-                category_logits = self.category_head(h_item, tgt_e_item)  # [M, n_cats]
-
-            if item_head_mode == "full":
-                item_logits = self.item_head(h_item, tgt_e_item, tgt_c_item)
-            elif item_head_mode in ("ctx", "hier"):
-                item_logits = None
-                item_ctx    = (h_item, tgt_e_item, tgt_c_item)
-            else:
-                raise ValueError(f"unknown item_head_mode={item_head_mode!r}")
-        else:
-            if item_head_mode == "full":
-                item_logits = self.item_head(h, tgt_e, tgt_c)
-            else:
-                raise ValueError(
-                    f"item_head_mode={item_head_mode!r} requires item_mask"
-                )
-
-        return action_logits, category_logits, item_logits, temporal_logits, item_ctx
+        return action_logits, category_logits, temporal_logits, item_ctx
 
     # Autoregressive inference
-
-    @torch.no_grad()
-    def infer(
-        self,
-        client_id: int,
-        sku: int,
-        start_dt,
-        history: Optional[List[dict]] = None,
-        max_steps: int = 50,
-        temperature: float = 1.0,
-    ) -> List[dict]:
-        """
-        Generate one session autoregressively.
-
-        Args:
-        client_id   : user id (from SimpleIdentitySampler)
-        sku         : seed item (0-indexed, from SimpleIdentitySampler)
-        start_dt    : session start time (datetime or pd.Timestamp)
-        history     : past event dicts for cross-session conditioning
-        max_steps   : max events before forced stop
-        temperature : sampling temperature
-
-        Returns:
-        List of event dicts: {client_id, event_type, sku, timestamp}
-        """
-        self.eval()
-        device = next(self.parameters()).device
-
-        if not isinstance(start_dt, pd.Timestamp):
-            start_dt = pd.Timestamp(start_dt)
-
-        # Encode cross-session history ->cross-attention memory
-        if history:
-            hist_emb = self._history_dicts_to_emb(history, device)  # [1, H, d_model]
-            memory   = self.history.encode(hist_emb)                 # [1, 1, d_model]
-        else:
-            memory = torch.zeros(1, 1, self.d_model, device=device)
-
-        # Load sku2idx mapping for correct embedding lookup (trained with remapped indices)
-        sku2idx: dict = getattr(self, "_sku2idx", {})
-        idx2sku: dict = getattr(self, "_idx2sku", {})
-
-        # Seed token: primes the generator with the seed item identity.
-        # Treated as a synthetic "exposure" at t=0; not emitted in output.
-        seed_item_idx = sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
-        cur_e = [ACTION2IDX["page_visit"]]
-        cur_i = [seed_item_idx]
-        cur_d = [0]
-
-        events_out: List[dict] = []
-        last_action_idx: Optional[int] = None
-        current_dt = start_dt
-
-        for _ in range(max_steps):
-            e_t = torch.tensor([cur_e], dtype=torch.long, device=device)
-            i_t = torch.tensor([cur_i], dtype=torch.long, device=device)
-            d_t = torch.tensor([cur_d], dtype=torch.long, device=device)
-
-            T   = e_t.size(1)
-            pos = torch.arange(T, device=device).unsqueeze(0)
-            x   = (
-                self.event_emb(e_t)
-                + self.item_emb(i_t)
-                + self.delta_emb(d_t)
-                + self.pos_emb(pos)
-            )
-
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device)
-            h   = self.decoder(x, memory, tgt_mask=tgt_mask)  # [1, T, d_model]
-            h_t = h[:, -1, :]                                  # [1, d_model]
-
-            # Action
-            a_logits = self.action_head(h_t, last_action_idx) / temperature
-            a_probs  = F.softmax(a_logits, dim=-1)
-            a_idx    = int(torch.multinomial(a_probs, 1).item())
-
-            if a_idx == EOS_IDX:
-                break
-
-            # Item (item-bearing actions only)
-            a_t = torch.tensor([a_idx], dtype=torch.long, device=device)
-            if a_idx in ITEM_BEARING_IDX:
-                i_logits = self.item_head(h_t, a_t) / temperature
-                k        = min(self.item_head.top_k, self.vocab_size)
-                topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)
-                i_probs  = F.softmax(topk_v, dim=-1)
-                chosen   = int(torch.multinomial(i_probs, 1).item())
-                i_idx    = int(topk_ids[0, chosen].item())
-            else:
-                i_idx = 0   # padding for non-item-bearing events
-
-            # Temporal bin ->seconds
-            i_t_s      = torch.tensor([i_idx], dtype=torch.long, device=device)
-            i_emb_t    = self.item_emb(i_t_s)                           # [1, d_model]
-            d_logits   = self.temporal_head(h_t, a_t, i_emb_t) / temperature
-            d_probs  = F.softmax(d_logits, dim=-1)
-            bin_idx  = int(torch.multinomial(d_probs, 1).item())
-            delta_s  = bin_to_seconds(bin_idx)
-
-            current_dt = current_dt + pd.Timedelta(seconds=delta_s)
-            # Decode item index ->raw SKU via idx2sku (inverse of sku2idx mapping)
-            if i_idx > 0:
-                sku_out = idx2sku.get(i_idx, i_idx - 1) if idx2sku else i_idx - 1
-            else:
-                sku_out = None
-
-            events_out.append({
-                "client_id":  client_id,
-                "event_type": IDX2ACTION[a_idx],
-                "sku":        sku_out,
-                "timestamp":  current_dt,
-            })
-
-            cur_e.append(a_idx)
-            cur_i.append(i_idx)
-            cur_d.append(bin_idx)
-            last_action_idx = a_idx
-
-        return events_out
 
     # Batched autoregressive inference with KV cache
 
@@ -677,15 +441,13 @@ class SessionTransformer(nn.Module):
         temperature: float = 1.0,
     ) -> List[List[dict]]:
         """
-        KV-cached batch inference.
+        Batched autoregressive inference.
 
-        Each step processes only the single new token [B, 1, d_model] through the
-        decoder, using per-layer caches for all past positions as K/V in self-attention.
-        This reduces per-step attention from O(T^2) to O(T) and eliminates the
-        growing-tensor torch.cat from the hot path.
-
-        KV cache layout: kv_caches[l] = layer-l inputs for positions 0..t-1, [B, t, d].
-        At step t the new token is the query; cat([cache, x_new]) is key/value.
+        Each step concatenates the new token onto the growing token stream and
+        runs the full sequence through ``self.decoder``. PyTorch's SDPA backend
+        auto-dispatches to FlashAttention / memory-efficient attention when the
+        inputs are bf16 and ``need_weights=False`` (the nn.TransformerDecoder
+        default), so no hand-rolled KV cache is needed at this sequence length.
 
         Args:
         batch_inputs : list of (client_id, sku, start_dt, history) tuples
@@ -696,53 +458,43 @@ class SessionTransformer(nn.Module):
         List[List[dict]] - one event-dict list per input
         """
         self.eval()
-        device   = next(self.parameters()).device
-        B        = len(batch_inputs)
-        sku2idx  = getattr(self, "_sku2idx", {})
-        idx2sku  = getattr(self, "_idx2sku", {})
-        n_layers = len(self.decoder.layers)
-        use_cuda = device.type == "cuda"
+        device  = next(self.parameters()).device
+        B       = len(batch_inputs)
+        sku2idx = getattr(self, "_sku2idx", {})
+        idx2sku = getattr(self, "_idx2sku", {})
 
-        # bf16 autocast: halves memory bandwidth, enables tensor cores on 4070 Ti.
-        # multinomial/indexing stay in fp32 automatically via autocast rules.
-        autocast_ctx = torch.autocast("cuda", dtype=torch.bfloat16) if use_cuda else torch.autocast("cpu", enabled=False)
+        autocast_ctx = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if device.type == "cuda"
+            else torch.autocast("cpu", enabled=False)
+        )
+
+        item_action_ids = torch.tensor(sorted(ITEM_BEARING_IDX), dtype=torch.long, device=device)
 
         with autocast_ctx:
             # Cross-attention memory [B, 1, d_model]
             memories = []
             for _, _, _, history in batch_inputs:
                 if history:
-                    hist_emb = self._history_dicts_to_emb(history, device)
-                    mem      = self.history.encode(hist_emb)
+                    mem = self.history.encode(self._history_dicts_to_emb(history, device))
                 else:
                     mem = torch.zeros(1, 1, self.d_model, device=device)
                 memories.append(mem)
-            memory = torch.cat(memories, dim=0)  # [B, 1, d_model]
+            memory = torch.cat(memories, dim=0)
 
-            # Seed token at position 0
-            seed_items = [
-                sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
-                for _, sku, _, _ in batch_inputs
-            ]
-            e0 = torch.tensor([[ACTION2IDX["page_visit"]]] * B, dtype=torch.long, device=device)
-            i0 = torch.tensor([[s] for s in seed_items],        dtype=torch.long, device=device)
-            d0 = torch.zeros(B, 1, dtype=torch.long, device=device)
-            p0 = torch.zeros(1, 1, dtype=torch.long, device=device)
-            c0 = torch.zeros(B, 1, dtype=torch.long, device=device)   # seed: PAD category
-            x  = self._build_input(e0, i0, d0, c0, p0)
+        # Seed token at position 0: synthetic page_visit on the seed item
+        seed_items = [
+            sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
+            for _, sku, _, _ in batch_inputs
+        ]
+        tok_e = torch.full((B, 1), ACTION2IDX["page_visit"], dtype=torch.long, device=device)
+        tok_i = torch.tensor([[s] for s in seed_items], dtype=torch.long, device=device)
+        tok_d = torch.zeros(B, 1, dtype=torch.long, device=device)
+        tok_c = torch.zeros(B, 1, dtype=torch.long, device=device)
 
-                # Pre-allocate KV buffers [B, max_steps+1, d] — no torch.cat in the hot loop
-            kv_dtype = torch.bfloat16 if use_cuda else torch.float32
-            kv_buf: List[Tensor] = [
-                torch.zeros(B, max_steps + 1, self.d_model, device=device, dtype=kv_dtype)
-                for _ in range(n_layers)
-            ]
-            x = self._run_decoder_prealloc(x, kv_buf, t=0, memory=memory)
-
-        done             = torch.zeros(B, dtype=torch.bool, device=device)
-        last_action_idxs = torch.full((B,), -1, dtype=torch.long, device=device)
-        events_out       = [[] for _ in range(B)]
-        current_dts      = [
+        done        = torch.zeros(B, dtype=torch.bool, device=device)
+        events_out  = [[] for _ in range(B)]
+        current_dts = [
             pd.Timestamp(sdt) if not isinstance(sdt, pd.Timestamp) else sdt
             for _, _, sdt, _ in batch_inputs
         ]
@@ -752,86 +504,63 @@ class SessionTransformer(nn.Module):
             if done.all():
                 break
 
+            T = step + 1
+            pos = torch.arange(T, device=device).unsqueeze(0)
+
             with autocast_ctx:
-                h_t = x[:, 0, :]   # [B, d_model]
+                x = self._build_input(tok_e, tok_i, tok_d, tok_c, pos)
+                tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device)
+                h = self.decoder(x, memory, tgt_mask=tgt_mask, tgt_is_causal=True)
+                h_t = h[:, -1, :]                                 # [B, d_model]
 
                 # Action
-                a_logits = self.action_head.fc(h_t) / temperature
-                a_logits = self.action_head.constraint_mask.apply_batch(a_logits, last_action_idxs)
+                a_logits = self.action_head(h_t) / temperature
                 a_probs  = F.softmax(a_logits.float(), dim=-1)
-                a_idxs   = torch.multinomial(a_probs, 1).squeeze(1)   # [B]
-
+                a_idxs   = torch.multinomial(a_probs, 1).squeeze(1)
                 newly_done = (a_idxs == EOS_IDX) | done
 
-                # Item (hierarchical: sample category first, then item within category)
-                is_item = torch.zeros(B, dtype=torch.bool, device=device)
-                for idx in ITEM_BEARING_IDX:
-                    is_item |= (a_idxs == idx)
-                is_item &= ~done
+                # Item mask (item-bearing, not already-done)
+                is_item = torch.isin(a_idxs, item_action_ids) & ~done
 
                 i_idxs = torch.zeros(B, dtype=torch.long, device=device)
-                c_full = torch.zeros(B, dtype=torch.long, device=device)   # category per session for input-side feed
+                c_full = torch.zeros(B, dtype=torch.long, device=device)
                 if is_item.any():
                     h_item = h_t[is_item]
                     a_item = a_idxs[is_item]
 
-                    # --- Category sampling (hierarchical mode) ---
-                    if self.category_head is not None and self._cat_sku_pools is not None:
-                        cat_logits = self.category_head(h_item, a_item) / temperature
-                        cat_probs  = F.softmax(cat_logits.float(), dim=-1)
-                        c_idxs     = torch.multinomial(cat_probs, 1).squeeze(1)  # [M]
+                    cat_logits = self.category_head(h_item, a_item) / temperature
+                    cat_probs  = F.softmax(cat_logits.float(), dim=-1)
+                    c_idxs     = torch.multinomial(cat_probs, 1).squeeze(1)
 
-                        # Per-session: sample item from within-category pool
-                        pools = self._cat_sku_pools   # list[Tensor] on device
-                        c_list = c_idxs.cpu().tolist()
-                        chosen_items = []
-                        for ci in c_list:
-                            pool = pools[ci] if ci < len(pools) else None
-                            if pool is not None and len(pool) > 0:
-                                k_pool = min(self.item_head.top_k, len(pool))
-                                # Score only items in this category's pool
-                                w_pool = self.item_head.fc.weight.index_select(0, pool[:k_pool])
-                                b_pool = self.item_head.fc.bias.index_select(0, pool[:k_pool])
-                                # Use h_item for the current session (indexed via loop pos)
-                                pass   # will be handled per-item below
-                                chosen_items.append((pool, ci))
-                            else:
-                                chosen_items.append((None, ci))
-
-                        # Vectorized per-session within-category item sampling
-                        item_result = torch.zeros(is_item.sum(), dtype=torch.long, device=device)
-                        for m, (pool, ci) in enumerate(chosen_items):
-                            h_m = h_item[m:m+1]   # [1, d_model]
-                            a_m = a_item[m:m+1]
-                            c_m = c_idxs[m:m+1]
-                            if pool is not None and len(pool) > 0:
-                                k_pool = min(self.item_head.top_k, len(pool))
-                                pool_k = pool[:k_pool]
-                                w_pool = self.item_head.fc.weight.index_select(0, pool_k)
-                                b_pool = self.item_head.fc.bias.index_select(0, pool_k)
-                                cond   = h_m + self.item_head.action_cond(a_m) + self.item_head.category_cond(c_m)
-                                logits = (cond @ w_pool.t() + b_pool) / temperature
-                                probs  = F.softmax(logits.float(), dim=-1)
-                                chosen = int(torch.multinomial(probs, 1).item())
-                                item_result[m] = pool_k[chosen]
-                            else:
-                                # Fallback: global top-k
-                                i_logits = self.item_head(h_m, a_m, c_m) / temperature
-                                k_fb = min(self.item_head.top_k, self.vocab_size)
-                                topk_v, topk_ids = torch.topk(i_logits, k_fb, dim=-1)
-                                probs = F.softmax(topk_v.float(), dim=-1)
-                                chosen = int(torch.multinomial(probs, 1).item())
-                                item_result[m] = topk_ids[0, chosen]
-                        i_idxs[is_item] = item_result
-                        c_full[is_item] = c_idxs
-                    else:
-                        # Standard (non-hierarchical) item sampling
-                        i_logits = self.item_head(h_item, a_item) / temperature
-                        k        = min(self.item_head.top_k, self.vocab_size)
-                        topk_v, topk_ids = torch.topk(i_logits, k, dim=-1)
-                        i_probs  = F.softmax(topk_v.float(), dim=-1)
-                        chosen   = torch.multinomial(i_probs, 1).squeeze(1)
-                        i_idxs[is_item] = topk_ids.gather(1, chosen.unsqueeze(1)).squeeze(1)
+                    pools = self._cat_sku_pools
+                    c_list = c_idxs.cpu().tolist()
+                    item_result = torch.zeros(is_item.sum(), dtype=torch.long, device=device)
+                    for m, ci in enumerate(c_list):
+                        pool = pools[ci] if pools is not None and ci < len(pools) else None
+                        h_m  = h_item[m:m+1]
+                        a_m  = a_item[m:m+1]
+                        c_m  = c_idxs[m:m+1]
+                        if pool is not None and len(pool) > 0:
+                            pool_k = pool[: min(self.item_head.top_k, len(pool))]
+                            w_pool = self.item_head.fc.weight.index_select(0, pool_k)
+                            b_pool = self.item_head.fc.bias.index_select(0, pool_k)
+                            cond   = (
+                                h_m
+                                + self.item_head.action_cond(a_m)
+                                + self.item_head.category_cond(c_m)
+                            )
+                            logits = (cond @ w_pool.t() + b_pool) / temperature
+                            probs  = F.softmax(logits.float(), dim=-1)
+                            item_result[m] = pool_k[int(torch.multinomial(probs, 1).item())]
+                        else:
+                            # Fallback: global top-k
+                            i_logits = self.item_head(h_m, a_m, c_m) / temperature
+                            k_fb     = min(self.item_head.top_k, self.vocab_size)
+                            topk_v, topk_ids = torch.topk(i_logits, k_fb, dim=-1)
+                            probs    = F.softmax(topk_v.float(), dim=-1)
+                            item_result[m] = topk_ids[0, int(torch.multinomial(probs, 1).item())]
+                    i_idxs[is_item] = item_result
+                    c_full[is_item] = c_idxs
 
                 # Temporal
                 i_emb_t  = self.item_emb(i_idxs)
@@ -862,65 +591,14 @@ class SessionTransformer(nn.Module):
                     "timestamp":  current_dts[b],
                 })
 
-            with autocast_ctx:
-                pos_t = torch.tensor([[step + 1]], dtype=torch.long, device=device)
-                x = self._build_input(
-                    a_idxs.unsqueeze(1),
-                    i_idxs.unsqueeze(1),
-                    bin_idxs.unsqueeze(1),
-                    c_full.unsqueeze(1),
-                    pos_t,
-                )
-                x = self._run_decoder_prealloc(x, kv_buf, t=step + 1, memory=memory)
-
-            last_action_idxs = torch.where(done, last_action_idxs, a_idxs)
-            done = newly_done
+            # Append the new token to the growing streams
+            tok_e = torch.cat([tok_e, a_idxs.unsqueeze(1)],   dim=1)
+            tok_i = torch.cat([tok_i, i_idxs.unsqueeze(1)],   dim=1)
+            tok_d = torch.cat([tok_d, bin_idxs.unsqueeze(1)], dim=1)
+            tok_c = torch.cat([tok_c, c_full.unsqueeze(1)],   dim=1)
+            done  = newly_done
 
         return events_out
-
-    def _run_decoder_prealloc(
-        self,
-        x: Tensor,
-        kv_buf: List[Tensor],  # [n_layers] of [B, max_steps+1, d_model] pre-allocated
-        t: int,                # current time step (0 = seed)
-        memory: Tensor,
-    ) -> Tensor:
-        """
-        Pass x [B, 1, d_model] through all decoder layers using pre-allocated KV buffers.
-        Writes layer-l input into kv_buf[l][:, t, :] then attends to kv_buf[l][:, :t+1, :].
-        No torch.cat — just in-place writes + contiguous slice views.
-        """
-        for l, layer in enumerate(self.decoder.layers):
-            x_in = x
-            kv_buf[l][:, t:t+1, :] = x_in           # write layer-l input at step t
-            kv_full = kv_buf[l][:, :t+1, :]          # view: positions 0..t (includes x_in)
-            x = self._decoder_layer_step(layer, x_in, kv_full, memory)
-        return x
-
-    def _decoder_layer_step(
-        self,
-        layer: nn.TransformerDecoderLayer,
-        x_new: Tensor,    # [B, 1, d_model]  — query (current token)
-        kv_full: Tensor,  # [B, t+1, d_model] — key/value (all positions 0..t, including x_new)
-        memory: Tensor,   # [B, m, d_model]
-    ) -> Tensor:          # [B, 1, d_model]
-        """
-        Single-step post-norm decoder layer forward.
-        kv_full already includes x_new at the last position — no torch.cat needed.
-        """
-        # Self-attention + residual + norm
-        sa = layer.self_attn(x_new, kv_full, kv_full, need_weights=False)[0]
-        x  = layer.norm1(x_new + layer.dropout1(sa))
-
-        # Cross-attention + residual + norm
-        ca = layer.multihead_attn(x, memory, memory, need_weights=False)[0]
-        x  = layer.norm2(x + layer.dropout2(ca))
-
-        # FFN + residual + norm
-        ff = layer.linear2(layer.dropout(layer.activation(layer.linear1(x))))
-        x  = layer.norm3(x + layer.dropout3(ff))
-
-        return x
 
     # Checkpoint I/O
 
@@ -960,8 +638,8 @@ class SessionTransformer(nn.Module):
     def load(
         cls,
         path,
-        valid_transitions: dict = None,
         device: str = "cpu",
+        **_legacy,   # accept and ignore removed kwargs (e.g. valid_transitions)
     ) -> "SessionTransformer":
         path       = Path(path)
         checkpoint = torch.load(path, map_location=device, weights_only=False)
@@ -988,7 +666,6 @@ class SessionTransformer(nn.Module):
             n_heads           = cfg["n_heads"],
             n_temporal_bins   = cfg["n_temporal_bins"],
             window_H          = cfg["window_H"],
-            valid_transitions = valid_transitions or {},
             n_categories      = cfg.get("n_categories", 0),
             sku_price_table   = sku_price_tbl,
             sku_name_table    = sku_name_tbl,

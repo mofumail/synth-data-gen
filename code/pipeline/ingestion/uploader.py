@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import List
 
 import pandas as pd
-import pymongo
 from pymongo import MongoClient
 
 from config import MONGO_DB, MONGO_URI, SYNTH_DIR

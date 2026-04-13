@@ -25,7 +25,7 @@ mongo_uri: "mongodb://localhost:27017"
 mongo_db:  "synerise"
 
 # Training
-train_epochs:       1
+train_epochs:       30
 train_batch_size:   256
 train_max_length:   50         # max events per session (including EOS)
 train_lr:           0.0003     # AdamW learning rate
@@ -34,11 +34,6 @@ train_n_layers:     4          # number of decoder layers
 train_n_heads:      4          # attention heads (must divide d_model)
 train_max_sessions: null       # null = use all sessions; set int for smoke tests
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
-
-# Item-head loss
-train_item_loss:      hierarchical   # "full" | "sampled" | "hierarchical"
-train_sampled_k:      8192           # only used for "sampled" mode; ignored by "hierarchical"
-train_sampled_alpha:  0.75           # unigram smoothing: Q(w) ∝ U(w)^alpha (word2vec convention)
 
 # Category head (hierarchical mode)
 category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token

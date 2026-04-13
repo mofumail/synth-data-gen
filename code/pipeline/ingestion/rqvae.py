@@ -48,7 +48,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from tqdm import tqdm
 
 from config import (
-    DATA_DIR, MODEL_DIR, OUTPUT_DIR,
+    DATA_DIR, OUTPUT_DIR,
     RQVAE_BATCH_SIZE, RQVAE_CAT_EMB_DIM, RQVAE_CODEBOOK_SIZE,
     RQVAE_EPOCHS, RQVAE_LATENT_DIM, RQVAE_LR, RQVAE_N_LEVELS,
     RQVAE_MODEL_PATH, SKU2CODES_PATH,

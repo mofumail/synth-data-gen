@@ -8,7 +8,7 @@ needs without reaching back into orchestrator state.
 """
 
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List
 
 

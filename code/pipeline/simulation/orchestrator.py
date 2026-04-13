@@ -11,7 +11,6 @@ Drives the full simulation loop.
 
 """
 
-import os
 import uuid
 import time
 import multiprocessing as mp
@@ -20,7 +19,7 @@ from typing import Dict
 
 import pandas as pd
 
-from config import MODEL_DIR, MODEL_NAME, EVAL_MODEL_SUBDIR, OUTPUT_DIR, SYNTH_DIR
+from config import MODEL_DIR, EVAL_MODEL_SUBDIR, OUTPUT_DIR, SYNTH_DIR
 from simulation.arrival.mmpp import MMPPArrivalModel
 from simulation.arrival.tod  import TODArrivalModel
 from simulation.identity.sampler import SimpleIdentitySampler

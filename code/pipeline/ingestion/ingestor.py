@@ -28,7 +28,7 @@ See: mermaid/Level4_DataIngestionUpload.md (SyneriseDataIngestor,
 from __future__ import annotations
 
 import math
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import List, Optional
 
 import pandas as pd

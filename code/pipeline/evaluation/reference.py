@@ -10,11 +10,9 @@ Also provides RealData (train/val/test session container) and RealDataLoader.
 
 from __future__ import annotations
 
-import json
 import os
-import random
 from collections import defaultdict
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -24,7 +22,7 @@ import pandas as pd
 import polars as pl
 
 from config import (
-    CLEAN_PARQUET, TEST_PARQUET, ITEM_BEARING_EVENTS, TRAIN_CUTOFF, VAL_CUTOFF, VOCAB_K,
+    CLEAN_PARQUET, TEST_PARQUET, TRAIN_CUTOFF, VAL_CUTOFF, VOCAB_K,
     OUTPUT_DIR,
 )
 

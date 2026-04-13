@@ -101,42 +101,28 @@ def get_vocab_stats(df_train_skus: pd.Series = None):
 
 
 def get_sku2idx(df_train_skus: pd.Series = None) -> dict:
-    """Load cached sku2idx or build and cache it (backward-compat wrapper)."""
-    if SKU2IDX_PATH.exists():
-        return joblib.load(SKU2IDX_PATH)
-    sku2idx, _ = get_vocab_stats(df_train_skus)
-    return sku2idx
+    """Load cached sku2idx or build and cache it."""
+    return get_vocab_stats(df_train_skus)[0]
 
 
 def ensure_vocab_stats() -> np.ndarray:
     """
-    Ensure VOCAB_STATS_PATH exists and return the counts array.
-
-    Fast path: if vocab_stats.joblib exists, load and return counts.
-    Slow path: read the training parquet (with the same train-split filter as
-    SessionDataset), compute counts, persist, return. Used by train.py when
-    running with sampled softmax and the stats cache is missing (legacy
-    sku2idx-only checkpoints).
+    Return the vocab counts array, rebuilding from parquet if the cache is missing.
+    Used by train.py when running with sampled softmax on a stats-less checkpoint.
     """
     if VOCAB_STATS_PATH.exists():
         return joblib.load(VOCAB_STATS_PATH)["counts"]
 
     print(f"  vocab_stats not found at {VOCAB_STATS_PATH}. "
           f"Rebuilding from {CLEAN_PARQUET} (one-time, ~1-2 min)...")
-    df = pl.read_parquet(
-        str(CLEAN_PARQUET),
-        columns=["timestamp", "session_id", "sku"],
-    )
-    train_cut = pd.Timestamp(TRAIN_CUTOFF)
+    df = pl.read_parquet(str(CLEAN_PARQUET), columns=["timestamp", "session_id", "sku"])
     session_starts = df.group_by("session_id").agg(
         pl.col("timestamp").min().alias("session_start")
     )
-    df = (
-        df.join(session_starts, on="session_id")
-          .filter(pl.col("session_start") < train_cut)
+    df = df.join(session_starts, on="session_id").filter(
+        pl.col("session_start") < pd.Timestamp(TRAIN_CUTOFF)
     )
-    skus = df.select("sku").to_series().to_pandas()
-    _, counts = get_vocab_stats(skus)
+    _, counts = get_vocab_stats(df.select("sku").to_series().to_pandas())
     return counts
 
 
@@ -532,13 +518,10 @@ def collate_fn(batch: List[Dict]) -> Dict:
         ct[i, :L] = s["categories"]
         ln[i]     = L
 
-    # Padding mask for transformer input (positions T-1 since forward shifts by 1)
+    # Padding mask for transformer input (positions T-1 since forward shifts by 1).
+    # True at positions >= L for each row. Vectorized over the batch.
     mask_len = max_len - 1
-    pad_mask = torch.zeros(B, mask_len, dtype=torch.bool)
-    for i, s in enumerate(batch):
-        L = s["length"]
-        if L < mask_len:
-            pad_mask[i, L:] = True
+    pad_mask = torch.arange(mask_len).unsqueeze(0) >= ln.unsqueeze(1)
 
     # History: pad to max history length in batch; None if no session has history
     histories = [s.get("history") for s in batch]

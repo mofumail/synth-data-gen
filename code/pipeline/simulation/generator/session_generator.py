@@ -16,7 +16,6 @@ See: mermaid/new/PROPOSED_Level3.md
 from __future__ import annotations
 
 import random
-from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -125,14 +124,11 @@ class SessionGenerator:
         if self._model is None:
             self._load_model()
 
-        events = self._model.infer(
-            client_id=client_id,
-            sku=sku,
-            start_dt=start_dt,
-            history=history,
+        events = self._model.infer_batch(
+            [(client_id, sku, start_dt, history)],
             max_steps=max_steps,
             temperature=temperature,
-        )
+        )[0]
 
         if apply_constraints and events:
             if not self.validity_layer.validate(events):

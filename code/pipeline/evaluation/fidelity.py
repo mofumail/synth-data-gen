@@ -20,7 +20,6 @@ Plus bias metrics (informational): item_coverage, popularity_jsd.
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Dict, List
 
 import numpy as np
 from scipy.spatial.distance import jensenshannon

@@ -14,7 +14,6 @@ Temporal deltas are sampled from the observed bin distribution.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Dict, List, Optional, Set
 
 import numpy as np
@@ -28,13 +27,11 @@ from simulation.generator.session_transformer import (
     IDX2ACTION,
     N_ACTIONS,
     EOS_IDX,
-    ITEM_BEARING_IDX,
     BIN_EDGES,
     N_TEMPORAL_BINS,
     TEMPORAL_MIN_S,
     TEMPORAL_MAX_S,
     bin_to_seconds,
-    seconds_to_bin,
 )
 from simulation.validity import ValidityLayer
 

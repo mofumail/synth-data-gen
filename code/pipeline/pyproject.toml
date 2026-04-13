@@ -22,3 +22,8 @@ dependencies = [
     "wandb>=0.25.1",
     "ctgan>=0.9.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.15.10",
+]
