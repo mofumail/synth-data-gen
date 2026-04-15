@@ -11,6 +11,7 @@ Architecture:
 
 Training  : teacher-forced; ItemHead/TemporalHead receive gold next-action.
 Inference : cascaded sampling, action -> item -> temporal.
+TODO: imports uit funcs halen
 """
 
 from __future__ import annotations
@@ -98,7 +99,7 @@ class CrossSessionHistory(nn.Module):
                            key_padding_mask=key_padding_mask.float() if key_padding_mask is not None else None)
         return ctx
 
-
+# Break for refactor; put heads in separate heads.py file.
 # Prediction heads
 
 class ActionHead(nn.Module):
@@ -310,7 +311,7 @@ class TemporalHead(nn.Module):
         cond = h_t + self.action_cond(action_t) + item_emb_t
         return self.fc(cond)
 
-
+# Break for refactoring
 # SessionTransformer
 
 class SessionTransformer(nn.Module):
@@ -523,8 +524,19 @@ class SessionTransformer(nn.Module):
 
         return action_logits, category_logits, temporal_logits, item_ctx
 
-    # Autoregressive inference
 
+    # Break for refactor; inference should maybe be moved to the generator class?
+    # class SessionGenerator;
+    #   def init (self, model: ses.Transf.)
+    #       self.model = model,
+    #       self.model.eval()
+
+    #   @torch.no_grad()
+    #   def geenrate_batch(sef, batch_input, max_steps, temp)
+    #       #Infer batch func
+
+
+    # Autoregressive inference
     # Batched autoregressive inference with KV cache
 
     @torch.no_grad()
