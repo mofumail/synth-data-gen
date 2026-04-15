@@ -202,6 +202,85 @@ class ItemHead(nn.Module):
         logits = logits.masked_fill(~mask, float('-inf'))
         return F.cross_entropy(logits, sku_ids)
 
+    # Polymorphic alias so train.py can call item_head.loss(...) for both
+    # ItemHead (flat hierarchical) and SVDPQItemHead (token factored) uniformly.
+    def loss(self, h_t, action_t, category_t, sku_ids):
+        return self.hierarchical_loss(h_t, action_t, category_t, sku_ids)
+
+
+class SVDPQItemHead(nn.Module):
+    """
+    SVD Product-Quantization item head.
+
+    Replaces the flat [d_model, V] softmax with t independent v-way softmaxes
+    predicted in parallel from (h_t + action_cond(a) + category_cond(c)).
+    Each item is represented offline as a t-tuple of tokens in [0, v-1] via
+    per-dim quantile binning of truncated SVD item embeddings
+    (see ingestion/svdpq.py).
+
+    Loss: mean cross-entropy across t*M token positions.
+
+    sku_tokens : [V, t] long buffer, populated via register_sku_tokens().
+    """
+
+    def __init__(self, d_model: int, t: int, v: int, n_categories: int = 0, top_k: int = 100):
+        super().__init__()
+        self.t = t
+        self.v = v
+        self.top_k = top_k
+        # One matmul producing all t*v logits; reshape to [M, t, v].
+        self.fc            = nn.Linear(d_model, t * v)
+        self.action_cond   = nn.Embedding(N_ACTIONS, d_model)
+        if n_categories > 0:
+            self.category_cond = nn.Embedding(n_categories, d_model, padding_idx=0)
+        else:
+            self.category_cond = None
+
+    def register_sku_tokens(self, sku_tokens: torch.Tensor) -> None:
+        """sku_tokens: [V, t] integer tensor, values in [0, v-1]."""
+        assert sku_tokens.ndim == 2 and sku_tokens.size(1) == self.t, (
+            f"sku_tokens must be [V, {self.t}], got {tuple(sku_tokens.shape)}"
+        )
+        self.register_buffer(
+            "sku_tokens",
+            sku_tokens.long().to(self.fc.weight.device),
+            persistent=False,
+        )
+
+    def _cond(self, h_t, action_t, category_t):
+        cond = h_t + self.action_cond(action_t)
+        if self.category_cond is not None and category_t is not None:
+            cond = cond + self.category_cond(category_t)
+        return cond
+
+    def loss(
+        self,
+        h_t: torch.Tensor,        # [M, d_model]
+        action_t: torch.Tensor,   # [M]
+        category_t: torch.Tensor, # [M] dense cat indices
+        sku_ids: torch.Tensor,    # [M] global SKU indices
+    ) -> torch.Tensor:
+        """Mean CE over M*t token positions."""
+        cond = self._cond(h_t, action_t, category_t)
+        logits = self.fc(cond).view(-1, self.t, self.v)        # [M, t, v]
+        targets = self.sku_tokens[sku_ids]                     # [M, t]
+        return F.cross_entropy(
+            logits.reshape(-1, self.v),
+            targets.reshape(-1),
+        )
+
+    def predict_tokens(
+        self,
+        h_t: torch.Tensor,
+        action_t: torch.Tensor,
+        category_t: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Argmax per dim. Returns [M, t] long token tuple."""
+        cond = self._cond(h_t, action_t, category_t)
+        logits = self.fc(cond).view(-1, self.t, self.v)
+        return logits.argmax(dim=-1)
+
+
 class TemporalHead(nn.Module):
     """
     Predicts inter-event delta_t as a categorical over N_TEMPORAL_BINS log bins.
@@ -271,6 +350,9 @@ class SessionTransformer(nn.Module):
         price_bins: int = 100,
         name_vocab: int = 256,
         name_len: int = 16,
+        sku_tokens_table: Optional[np.ndarray] = None, # [V, svdpq_t] int, 0=PAD row
+        svdpq_t: int = 0,                              # tokens per item (0 = disabled)
+        svdpq_v: int = 0,                              # bins per dim
     ):
         super().__init__()
         self.d_model      = d_model
@@ -334,7 +416,19 @@ class SessionTransformer(nn.Module):
         # Prediction heads
         self.action_head   = ActionHead(d_model, n_actions)
         self.category_head = CategoryHead(d_model, n_categories) if n_categories > 0 else None
-        self.item_head     = ItemHead(d_model, vocab_size, n_categories=n_categories, top_k=100)
+        # SVD-PQ head when sku_tokens_table is supplied; otherwise flat 630K head.
+        self.svdpq_enabled = sku_tokens_table is not None and svdpq_t > 0
+        if self.svdpq_enabled:
+            self.item_head = SVDPQItemHead(
+                d_model, t=svdpq_t, v=svdpq_v,
+                n_categories=n_categories, top_k=100,
+            )
+            # Test
+            if sku_tokens_table is not None:
+                self.item_head.register_sku_tokens(torch.as_tensor(sku_tokens_table, dtype=torch.long))
+                # end test
+        else:
+            self.item_head = ItemHead(d_model, vocab_size, n_categories=n_categories, top_k=100)
         self.temporal_head = TemporalHead(d_model, n_temporal_bins)
 
         # Populated at inference time via set_cat_sku_pools()
@@ -535,30 +629,50 @@ class SessionTransformer(nn.Module):
                     pools = self._cat_sku_pools
                     c_list = c_idxs.cpu().tolist()
                     item_result = torch.zeros(is_item.sum(), dtype=torch.long, device=device)
-                    for m, ci in enumerate(c_list):
-                        pool = pools[ci] if pools is not None and ci < len(pools) else None
-                        h_m  = h_item[m:m+1]
-                        a_m  = a_item[m:m+1]
-                        c_m  = c_idxs[m:m+1]
-                        if pool is not None and len(pool) > 0:
-                            pool_k = pool[: min(self.item_head.top_k, len(pool))]
-                            w_pool = self.item_head.fc.weight.index_select(0, pool_k)
-                            b_pool = self.item_head.fc.bias.index_select(0, pool_k)
-                            cond   = (
-                                h_m
-                                + self.item_head.action_cond(a_m)
-                                + self.item_head.category_cond(c_m)
-                            )
-                            logits = (cond @ w_pool.t() + b_pool) / temperature
-                            probs  = F.softmax(logits.float(), dim=-1)
-                            item_result[m] = pool_k[int(torch.multinomial(probs, 1).item())]
-                        else:
-                            # Fallback: global top-k
-                            i_logits = self.item_head(h_m, a_m, c_m) / temperature
-                            k_fb     = min(self.item_head.top_k, self.vocab_size)
-                            topk_v, topk_ids = torch.topk(i_logits, k_fb, dim=-1)
-                            probs    = F.softmax(topk_v.float(), dim=-1)
-                            item_result[m] = topk_ids[0, int(torch.multinomial(probs, 1).item())]
+
+                    if isinstance(self.item_head, SVDPQItemHead):
+                        # SVD-PQ inference: predict t tokens, then pick the in-category
+                        # SKU with highest token-match count (Hamming-based score).
+                        pred_tokens = self.item_head.predict_tokens(
+                            h_item, a_item, c_idxs,
+                        )  # [M, t]
+                        for m, ci in enumerate(c_list):
+                            pool = pools[ci] if pools is not None and ci < len(pools) else None
+                            if pool is not None and len(pool) > 0:
+                                pool_tokens = self.item_head.sku_tokens[pool]    # [P, t]
+                                match = (pool_tokens == pred_tokens[m]).sum(dim=-1)  # [P]
+                                k_fb  = min(self.item_head.top_k, len(pool))
+                                top_v, top_idx = match.topk(k_fb)
+                                probs = F.softmax(top_v.float() / max(temperature, 1e-6), dim=-1)
+                                item_result[m] = pool[top_idx[int(torch.multinomial(probs, 1).item())]]
+                            else:
+                                # No pool for predicted category: fall back to PAD
+                                item_result[m] = 0
+                    else:
+                        for m, ci in enumerate(c_list):
+                            pool = pools[ci] if pools is not None and ci < len(pools) else None
+                            h_m  = h_item[m:m+1]
+                            a_m  = a_item[m:m+1]
+                            c_m  = c_idxs[m:m+1]
+                            if pool is not None and len(pool) > 0:
+                                pool_k = pool[: min(self.item_head.top_k, len(pool))]
+                                w_pool = self.item_head.fc.weight.index_select(0, pool_k)
+                                b_pool = self.item_head.fc.bias.index_select(0, pool_k)
+                                cond   = (
+                                    h_m
+                                    + self.item_head.action_cond(a_m)
+                                    + self.item_head.category_cond(c_m)
+                                )
+                                logits = (cond @ w_pool.t() + b_pool) / temperature
+                                probs  = F.softmax(logits.float(), dim=-1)
+                                item_result[m] = pool_k[int(torch.multinomial(probs, 1).item())]
+                            else:
+                                # Fallback: global top-k
+                                i_logits = self.item_head(h_m, a_m, c_m) / temperature
+                                k_fb     = min(self.item_head.top_k, self.vocab_size)
+                                topk_v, topk_ids = torch.topk(i_logits, k_fb, dim=-1)
+                                probs    = F.softmax(topk_v.float(), dim=-1)
+                                item_result[m] = topk_ids[0, int(torch.multinomial(probs, 1).item())]
                     i_idxs[is_item] = item_result
                     c_full[is_item] = c_idxs
 
@@ -568,7 +682,7 @@ class SessionTransformer(nn.Module):
                 d_probs  = F.softmax(d_logits.float(), dim=-1)
                 bin_idxs = torch.multinomial(d_probs, 1).squeeze(1)
 
-            # Bulk CPU transfer — one sync per step instead of 3×B individual .item() calls
+            # Bulk CPU transfer, one sync per step instead of 3×B individual .item() calls
             a_list    = a_idxs.cpu().tolist()
             i_list    = i_idxs.cpu().tolist()
             bin_list  = bin_idxs.cpu().tolist()
@@ -630,6 +744,9 @@ class SessionTransformer(nn.Module):
                 "n_categories":    self.n_categories,
                 "has_price":       self.price_emb is not None,
                 "has_name":        self.name_tok_emb is not None,
+                "svdpq_enabled":   self.svdpq_enabled,
+                "svdpq_t":         self.item_head.t if self.svdpq_enabled else 0,
+                "svdpq_v":         self.item_head.v if self.svdpq_enabled else 0,
             },
         }, path)
         print(f"  SessionTransformer saved ->{path}")
@@ -658,6 +775,15 @@ class SessionTransformer(nn.Module):
             except Exception as e:
                 print(f"  [warn] failed to load sku_properties for inference: {e}")
 
+        # Rebuild SVD-PQ token table (not in state_dict — persistent=False buffer).
+        sku_tokens_tbl = None
+        if cfg.get("svdpq_enabled", False):
+            try:
+                from ingestion.dataset import get_sku_tokens
+                sku_tokens_tbl = get_sku_tokens()
+            except Exception as e:
+                print(f"  [warn] failed to load sku_tokens for SVD-PQ inference: {e}")
+
         model = cls(
             vocab_size        = cfg["vocab_size"],
             d_model           = cfg["d_model"],
@@ -669,7 +795,15 @@ class SessionTransformer(nn.Module):
             n_categories      = cfg.get("n_categories", 0),
             sku_price_table   = sku_price_tbl,
             sku_name_table    = sku_name_tbl,
+            sku_tokens_table  = sku_tokens_tbl,
+            svdpq_t           = cfg.get("svdpq_t", 0),
+            svdpq_v           = cfg.get("svdpq_v", 0),
         )
+
+        # test
+        if sku_tokens_tbl is not None:
+            model.item_head.register_sku_tokens(torch.as_tensor(sku_tokens_tbl))
+        # end test
         model._cat_sku_pools = None
         model.load_state_dict(checkpoint["state_dict"], strict=False)
         model.to(device)

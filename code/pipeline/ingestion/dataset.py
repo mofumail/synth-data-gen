@@ -29,7 +29,7 @@ from collections import defaultdict
 
 from config import (
     CLEAN_PARQUET, HISTORY_WINDOW, OUTPUT_DIR, TRAIN_CUTOFF, VAL_CUTOFF, VOCAB_K,
-    CAT2IDX_PATH, CAT_SKU_POOLS_PATH,
+    CAT2IDX_PATH, CAT_SKU_POOLS_PATH, SVDPQ_PATH,
 )
 from simulation.generator.session_transformer import (
     ACTION2IDX, BIN_EDGES, EOS_IDX, N_TEMPORAL_BINS, TEMPORAL_MIN_S, TEMPORAL_MAX_S,
@@ -181,6 +181,19 @@ def get_sku_properties(sku2idx: dict = None) -> dict:
         f"({matched:,}/{V:,} SKUs matched)"
     )
     return out
+
+
+def get_sku_tokens() -> np.ndarray:
+    """
+    Load SVD-PQ tokens [VOCAB_K, SVDPQ_T] int16 (values in [0, SVDPQ_V-1]).
+    Index 0 is PAD (all zeros). Built by ingestion/svdpq.py.
+    """
+    if not SVDPQ_PATH.exists():
+        raise FileNotFoundError(
+            f"sku_tokens not found at {SVDPQ_PATH}. "
+            "Run: PYTHONPATH=. uv run python ingestion/svdpq.py"
+        )
+    return joblib.load(SVDPQ_PATH)
 
 
 def get_cat_vocab(sku2idx: dict = None):

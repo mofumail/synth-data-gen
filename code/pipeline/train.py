@@ -9,8 +9,7 @@ Four factored cross-entropy losses:
 
 All hyperparameters are read from config.yaml.
 
-Usage:
-    PYTHONPATH=. uv run python train.py
+Usage: PYTHONPATH=. uv run python train.py
 
 Checkpoint saved to MODEL_SUBDIR/model.pt on val loss improvement.
 A config.yaml snapshot is written alongside the checkpoint.
@@ -34,12 +33,14 @@ from config import (
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
     TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
     N_CATEGORIES, CAT2IDX_PATH,
+    SVDPQ_ENABLED, SVDPQ_T, SVDPQ_V,
 )
 from ingestion.dataset import (
     InteractionGenerator, get_cat_vocab, get_sku2idx, get_sku_properties,
+    get_sku_tokens,
 )
 from simulation.generator.session_transformer import (
-    SessionTransformer,
+    SessionTransformer, SVDPQItemHead,
     ITEM_BEARING_IDX,
 )
 
@@ -81,7 +82,7 @@ def train():
         },
     )
 
-    # All metrics use epoch as x-axis
+    # All metrics should use epoch as x-axis
     wandb.define_metric("epoch")
     wandb.define_metric("train/*", step_metric="epoch")
     wandb.define_metric("val/*",   step_metric="epoch")
@@ -95,7 +96,7 @@ def train():
         num_workers=TRAIN_NUM_WORKERS,
         max_sessions=TRAIN_MAX_SESSIONS,
     )
-    print(f"  {len(gen.dataset):,} training sessions | {len(gen):,} batches/epoch")
+    print(f"{len(gen.dataset):,} training sessions | {len(gen):,} batches/epoch")
 
     print(f"\nLoading validation dataset ...")
     val_gen = InteractionGenerator(
@@ -105,7 +106,7 @@ def train():
         num_workers=TRAIN_NUM_WORKERS,
         max_sessions=None,        # always use full val set
     )
-    print(f"  {len(val_gen.dataset):,} val sessions | {len(val_gen):,} batches")
+    print(f"{len(val_gen.dataset):,} val sessions | {len(val_gen):,} batches")
 
     # Category vocab: load per-category SKU pools as GPU tensors. Used to build
     # the masked softmax so the item-head loss normalizes only over SKUs in the
@@ -128,6 +129,13 @@ def train():
     sku_props = get_sku_properties(sku2idx)
     print(f"  SKU aux features: price + name")
 
+    # SVD-PQ tokens (optional output-side item representation)
+    sku_tokens = None
+    if SVDPQ_ENABLED:
+        sku_tokens = get_sku_tokens()
+        print(f"  SVD-PQ tokens: shape={sku_tokens.shape} dtype={sku_tokens.dtype} "
+              f"(t={SVDPQ_T}, v={SVDPQ_V})")
+
     # Model
     model = SessionTransformer(
         vocab_size=VOCAB_K,
@@ -139,12 +147,23 @@ def train():
         n_categories=N_CATEGORIES,
         sku_price_table=sku_props["price"],
         sku_name_table =sku_props["name"],
+        sku_tokens_table=sku_tokens,
+        svdpq_t=SVDPQ_T if SVDPQ_ENABLED else 0,
+        svdpq_v=SVDPQ_V if SVDPQ_ENABLED else 0,
     ).to(device)
-    # Capture the uncompiled item_head BEFORE torch.compile so hierarchical_loss
-    # reaches the real module rather than going through the OptimizedModule wrapper.
+    # Capture the uncompiled item_head BEFORE torch.compile so its .loss /
+    # .hierarchical_loss reaches the real module rather than going through the
+    # OptimizedModule wrapper.
     item_head = model.item_head
-    item_head.register_sku_cat_map(cat_sku_pools_tensors, VOCAB_K)
+    if isinstance(item_head, SVDPQItemHead):
+        item_head.register_sku_tokens(
+            torch.as_tensor(sku_tokens, dtype=torch.long, device=device)
+        )
+    #test
+    else:
+        item_head.register_sku_cat_map(cat_sku_pools_tensors, VOCAB_K)
     model = torch.compile(model)
+    # model = torch.compile(model, dymamic=True) #
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {n_params:,}")
@@ -208,7 +227,7 @@ def train():
                 if item_valid.any():
                     h_item, tgt_e_item, tgt_c_item = item_ctx
                     category_loss = F.cross_entropy(category_logits, tgt_categories[item_valid])
-                    item_loss = item_head.hierarchical_loss(
+                    item_loss = item_head.loss(
                         h_item, tgt_e_item, tgt_c_item,
                         tgt_items[item_valid],
                     )
@@ -291,7 +310,7 @@ def train():
                     if item_valid.any():
                         h_item, tgt_e_item, tgt_c_item = val_item_ctx
                         val_cat_loss  = F.cross_entropy(category_logits, tgt_categories[item_valid])
-                        val_item_loss = item_head.hierarchical_loss(
+                        val_item_loss = item_head.loss(
                             h_item, tgt_e_item, tgt_c_item,
                             tgt_items[item_valid],
                         )
