@@ -12,6 +12,7 @@ MODEL_DIR          = OUTPUT_DIR / "models"
 SYNTH_DIR          = OUTPUT_DIR / "synthetic"
 CAT2IDX_PATH       = OUTPUT_DIR / "cat2idx.joblib"
 CAT_SKU_POOLS_PATH = OUTPUT_DIR / "cat_sku_pools.joblib"
+SVDPQ_PATH         = OUTPUT_DIR / "sku_tokens.joblib"
 
 # Load config.yaml
 _cfg = yaml.safe_load((PIPELINE_DIR / "config.yaml").read_text())
@@ -63,6 +64,18 @@ TRAIN_NUM_WORKERS  = _cfg.get("train_num_workers", 4)
 
 #Category head (hierarchical item loss)
 CATEGORY_RARE_THRESHOLD = _cfg.get("category_rare_threshold", 5)
+
+#SVD-PQ item tokenizer
+SVDPQ_ENABLED          = _cfg.get("svdpq_enabled", False)
+SVDPQ_T                = _cfg.get("svdpq_t", 32)
+SVDPQ_V                = _cfg.get("svdpq_v", 64)
+SVDPQ_BINNING          = _cfg.get("svdpq_binning", "quantile")
+SVDPQ_NOISE_STD        = _cfg.get("svdpq_noise_std", 1e-4)
+SVDPQ_MIN_INTERACTIONS = _cfg.get("svdpq_min_interactions", 3)
+SVDPQ_EVENT_WEIGHTS    = _cfg.get("svdpq_event_weights", {
+    "product_buy": 10.0, "add_to_cart": 3.0, "remove_from_cart": 1.0,
+    "page_visit": 1.0, "search_query": 0.0,
+})
 
 def _load_n_categories() -> int:
     """Load n_categories from cat2idx.joblib if available (built by preprocess.py)."""

@@ -42,6 +42,20 @@ category_rare_threshold: 5   # categories with <= this many SKUs are collapsed t
 eval_model: session_transformer_d128_l4_h4_hier   # model subdir to load for evaluate.py
                                              # change this to switch which checkpoint gets evaluated
 
+# SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
+svdpq_enabled:          true
+svdpq_t:                32         # SVD dims -> tokens per item
+svdpq_v:                64         # bins per dim
+svdpq_binning:          quantile   # quantile | uniform
+svdpq_noise_std:        0.0001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
+svdpq_min_interactions: 3          # below this -> category-centroid cold-start fallback
+svdpq_event_weights:
+  product_buy:       10.0
+  add_to_cart:        3.0
+  remove_from_cart:   1.0
+  page_visit:         1.0
+  search_query:       0.0
+
 # GRU4Rec downstream evaluator
 gru4rec_embed_dim:   64
 gru4rec_hidden_dim:  128
