@@ -91,8 +91,9 @@ N_CATEGORIES = _load_n_categories()
 # Derived: unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_hier"
-MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/  -one folder per variant
+_MODEL_VARIANT = "svdpq" if SVDPQ_ENABLED else "hier"
+MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_{_MODEL_VARIANT}"
+MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/
 
 #Evaluation model (independent of training config)
 EVAL_MODEL_NAME  = _cfg.get("eval_model", MODEL_NAME)   # defaults to current train model

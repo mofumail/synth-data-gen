@@ -25,7 +25,7 @@ mongo_uri: "mongodb://localhost:27017"
 mongo_db:  "synerise"
 
 # Training
-train_epochs:       30
+train_epochs:       5
 train_batch_size:   256
 train_max_length:   50         # max events per session (including EOS)
 train_lr:           0.0003     # AdamW learning rate
@@ -39,7 +39,7 @@ train_num_workers:  4          # dataset is built in main process; workers only 
 category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token
 
 # Evaluation
-eval_model: session_transformer_d128_l4_h4_hier   # model subdir to load for evaluate.py
+eval_model: session_transformer_d128_l4_h4_svdpq   # model subdir to load for evaluate.py
                                              # change this to switch which checkpoint gets evaluated
 
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
