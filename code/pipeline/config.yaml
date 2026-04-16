@@ -44,8 +44,8 @@ eval_model: session_transformer_d128_l4_h4_svdpq   # model subdir to load for ev
 
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
 svdpq_enabled:          true
-svdpq_t:                32         # SVD dims -> tokens per item
-svdpq_v:                64         # bins per dim
+svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
+svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
 svdpq_binning:          quantile   # quantile | uniform
 svdpq_noise_std:        0.0001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
 svdpq_min_interactions: 3          # below this -> category-centroid cold-start fallback
