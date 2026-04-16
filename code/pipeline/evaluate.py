@@ -111,11 +111,11 @@ def build_transformer_generator(ref_store: ReferenceStore) -> SessionGenerator:
 def evaluate(args):
     t0 = time.time()
 
-    # --- Identity sampler ---
+    # Identity sampler
     print("\nChecking identity sampler ...")
     ensure_identity_sampler()
 
-    # --- Real data ---
+    #  Real data
     print("\nLoading real data ...")
     real_data = RealDataLoader.load(
         max_train_sessions = args.max_train,
@@ -124,16 +124,16 @@ def evaluate(args):
         include_test       = args.final,
     )
 
-    # --- Reference stores ---
+    # Reference stores
     ref_store, val_ref_store = build_ref_store(real_data)
 
-    # --- Generators ---
+    # Generators
     print("\nBuilding generators ...")
     primary_gen  = build_transformer_generator(ref_store)
     baseline_gen = MarkovSessionGenerator.from_parquet(max_length=50)
     print("  Generators ready.")
 
-    # --- Orchestrate ---
+    # Orchestrate
     gru4rec_dir = MODEL_DIR / "gru4rec"
     orchestrator = EvaluationOrchestrator(
         num_seeds        = args.num_seeds,
@@ -152,7 +152,7 @@ def evaluate(args):
         use_test_split  = args.final,
     )
 
-    # --- Report ---
+    # Report
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     reporter = ReportGenerator()
     html     = reporter.generate(aggregated)
@@ -164,7 +164,7 @@ def evaluate(args):
     print(f"Reports -> {REPORTS_DIR}")
 
     # Quick summary to stdout
-    print("\n=== Summary ===")
+    print("\nSummary ")
     ft = aggregated.fidelity_train_mean
     fv = aggregated.fidelity_val_mean
     print(f"  Fidelity vs train | JSD(action)={ft.jsd_action:.4f}  KS(len)={ft.ks_session_length:.4f}  diversity={ft.sample_diversity:.4f}  L1(bigrams)={ft.l1_action_bigrams:.4f}  JSD(pop)={ft.bias.popularity_jsd:.4f}  coverage={ft.bias.item_coverage:.4f}  gini_delta={ft.bias.gini_coefficient_delta:.4f}")
@@ -209,7 +209,7 @@ def run_fidelity_only(args):
     fv = fid_ev.evaluate(real_data, synth, val_ref_store)
 
     def _print(label, f):
-        print(f"\n=== Fidelity {label} ===")
+        print(f"\n Fidelity {label} ")
         print(f"  JSD(action)        = {f.jsd_action:.4f}")
         print(f"  KS(session_len)    = {f.ks_session_length:.4f}")
         print(f"  KS(temporal_delta) = {f.ks_temporal_delta:.4f}")
@@ -237,7 +237,7 @@ def parse_args():
                    help="Cap test sessions (default: all)")
     p.add_argument("--num-seeds",      type=int,   default=5)
     p.add_argument("--base-seed",      type=int,   default=42)
-    p.add_argument("--n-sessions",     type=int,   default=1000,
+    p.add_argument("--n-sessions",     type=int,   default=1000000,
                    help="Synthetic sessions to generate per seed")
     p.add_argument("--k",              type=int,   default=10,
                    help="Cutoff for HR@K and NDCG@K")
