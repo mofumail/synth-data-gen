@@ -1,5 +1,5 @@
 Requires uv
-Run uv sync once after cloning, then uv run python <script>.py
+Run uv sync once after cloning, then uv run python xxx.py
 
 Raw Synerise parquets expected at ../DATA/ relative to code/pipeline/                    
   (edit DATA_DIR in config.py to change).
