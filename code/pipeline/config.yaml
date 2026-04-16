@@ -36,22 +36,28 @@ train_max_sessions: null       # null = use all sessions; set int for smoke test
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
 
 # Category head (hierarchical mode)
-category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token
+category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token, based on notbooks/cat_rare_treshhold.py
+# This one doesn't really matter, SKu coverage numbers are tiny across the board, treshhold 50 only collapses 3.5% of SKUs
+#
 
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
 svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
 item_head_top_k:        100        # items kept from item head at inference (affects both ItemHead and SVDPQItemHead)
-svdpq_binning:          quantile   # quantile | uniform
+svdpq_binning:          quantile   # quantile | uniform , quantile seems better; offers even bin sizes
 svdpq_noise_std:        0.0001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
-svdpq_min_interactions: 3          # below this -> category-centroid cold-start fallback
-svdpq_event_weights:
-  product_buy:       10.0
-  add_to_cart:        3.0
-  remove_from_cart:   1.0
-  page_visit:         1.0
-  search_query:       0.0
+svdpq_min_interactions: 2          # below this -> category-centroid cold-start fallback, # based on : notebooks/interactions.py
+# The knee is somewhere inbetween 1 - 2
+# The jump from treshhold 1-2 is 27.3pp, to 29.8pp from 2-3
+
+
+svdpq_event_weights:     # decided based on notebooks/tf-idf-weights.py, inverse frequency
+  product_buy:        4.0321
+  add_to_cart:        2.6985
+  remove_from_cart:   3.7798
+  page_visit:         0.2513
+  search_query:       2.1683
 
 # GRU4Rec downstream evaluator
 gru4rec_embed_dim:   64

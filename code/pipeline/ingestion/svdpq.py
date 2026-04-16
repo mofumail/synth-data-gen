@@ -11,7 +11,7 @@ Output is:
     output/sku_tokens.joblib   [V, t] int16 array, values in [0, v-1]
 
 1. Build weighted sparse (user, sku) matrix A from events_clean.parquet using
-   SVDPQ_EVENT_WEIGHTS (buy=10, cart=3, page_visit=1, ...). /// Ablation for balances
+   SVDPQ_EVENT_WEIGHTS (. /// tf-idf on load-bearing events
 2. Frequency damp (BM25-style): divide each nonzero by
    log1p(user_rowsum) * log1p(item_colsum) to stop power users / popular items
    from dominating SVD.
@@ -85,7 +85,7 @@ def _build_interaction_matrix(sku2idx: Dict[int, int]) -> tuple[sp.csr_matrix, n
         [weight_map.get(str(e), 0.0) for e in event_arr],
         dtype=np.float32,
     )
-    keep = weights > 0
+    keep = weights != 0
     client_row = client_row[keep]
     sku_arr    = sku_arr[keep]
     weights    = weights[keep]
