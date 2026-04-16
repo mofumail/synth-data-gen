@@ -93,9 +93,11 @@ _MODEL_VARIANT = f"svdpq_t{SVDPQ_T}v{SVDPQ_V}" if SVDPQ_ENABLED else "hier"
 MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_{_MODEL_VARIANT}"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/
 
-#Evaluation model (independent of training config)
-EVAL_MODEL_NAME  = _cfg["eval_model"]
-EVAL_MODEL_SUBDIR = MODEL_DIR / EVAL_MODEL_NAME
+#Evaluation model: always the model just trained. No separate eval_model key —
+#MODEL_NAME is derived from train_* and svdpq_t/v, so eval automatically points
+#at the matching checkpoint folder.
+EVAL_MODEL_NAME   = MODEL_NAME
+EVAL_MODEL_SUBDIR = MODEL_SUBDIR
 
 #GRU4Rec downstream evaluator
 GRU4REC_VOCAB_K     = _cfg["gru4rec_vocab_k"]

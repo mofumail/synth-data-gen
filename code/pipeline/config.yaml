@@ -38,10 +38,6 @@ train_num_workers:  4          # dataset is built in main process; workers only 
 # Category head (hierarchical mode)
 category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token
 
-# Evaluation
-eval_model: session_transformer_d128_l4_h4_svdpq   # model subdir to load for evaluate.py
-                                             # change this to switch which checkpoint gets evaluated
-
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
 svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16

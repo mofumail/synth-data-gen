@@ -382,13 +382,6 @@ def train():
     print(f"Model saved to: {MODEL_SUBDIR / 'model.pt'}")
     wandb.finish()
 
-    print(f"""
-        eval_model in config.yaml is now a required key (no default). If you're running
-        evaluate.py right after train.py, set eval_model to match the trained MODEL_NAME for
-        that run (e.g. session_transformer_d128_l4_h4_svdpq_t4v512), otherwise eval will point at
-        the wrong checkpoint folder.
-    """)
-
 
 if __name__ == "__main__":
     train()
