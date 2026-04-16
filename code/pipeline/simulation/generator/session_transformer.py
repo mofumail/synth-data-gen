@@ -354,6 +354,7 @@ class SessionTransformer(nn.Module):
         sku_tokens_table: Optional[np.ndarray] = None, # [V, svdpq_t] int, 0=PAD row
         svdpq_t: int = 0,                              # tokens per item (0 = disabled)
         svdpq_v: int = 0,                              # bins per dim
+        item_head_top_k: int = 100,                    # items kept from item head at inference
     ):
         super().__init__()
         self.d_model      = d_model
@@ -422,14 +423,14 @@ class SessionTransformer(nn.Module):
         if self.svdpq_enabled:
             self.item_head = SVDPQItemHead(
                 d_model, t=svdpq_t, v=svdpq_v,
-                n_categories=n_categories, top_k=100,
+                n_categories=n_categories, top_k=item_head_top_k,
             )
             # Test
             if sku_tokens_table is not None:
                 self.item_head.register_sku_tokens(torch.as_tensor(sku_tokens_table, dtype=torch.long))
                 # end test
         else:
-            self.item_head = ItemHead(d_model, vocab_size, n_categories=n_categories, top_k=100)
+            self.item_head = ItemHead(d_model, vocab_size, n_categories=n_categories, top_k=item_head_top_k)
         self.temporal_head = TemporalHead(d_model, n_temporal_bins)
 
         # Populated at inference time via set_cat_sku_pools()
@@ -759,6 +760,7 @@ class SessionTransformer(nn.Module):
                 "svdpq_enabled":   self.svdpq_enabled,
                 "svdpq_t":         self.item_head.t if self.svdpq_enabled else 0,
                 "svdpq_v":         self.item_head.v if self.svdpq_enabled else 0,
+                "item_head_top_k": self.item_head.top_k,
             },
         }, path)
         print(f"  SessionTransformer saved ->{path}")
@@ -810,6 +812,7 @@ class SessionTransformer(nn.Module):
             sku_tokens_table  = sku_tokens_tbl,
             svdpq_t           = cfg.get("svdpq_t", 0),
             svdpq_v           = cfg.get("svdpq_v", 0),
+            item_head_top_k   = cfg.get("item_head_top_k", 100),
         )
 
         # test

@@ -60,22 +60,20 @@ TRAIN_D_MODEL      = _cfg["train_d_model"]
 TRAIN_N_LAYERS     = _cfg["train_n_layers"]
 TRAIN_N_HEADS      = _cfg["train_n_heads"]
 TRAIN_MAX_SESSIONS = _cfg["train_max_sessions"]   # None = full dataset
-TRAIN_NUM_WORKERS  = _cfg.get("train_num_workers", 4)
+TRAIN_NUM_WORKERS  = _cfg["train_num_workers"]
 
 #Category head (hierarchical item loss)
-CATEGORY_RARE_THRESHOLD = _cfg.get("category_rare_threshold", 5)
+CATEGORY_RARE_THRESHOLD = _cfg["category_rare_threshold"]
 
 #SVD-PQ item tokenizer
-SVDPQ_ENABLED          = _cfg.get("svdpq_enabled", False)
-SVDPQ_T                = _cfg.get("svdpq_t", 32)
-SVDPQ_V                = _cfg.get("svdpq_v", 64)
-SVDPQ_BINNING          = _cfg.get("svdpq_binning", "quantile")
-SVDPQ_NOISE_STD        = _cfg.get("svdpq_noise_std", 1e-4)
-SVDPQ_MIN_INTERACTIONS = _cfg.get("svdpq_min_interactions", 3)
-SVDPQ_EVENT_WEIGHTS    = _cfg.get("svdpq_event_weights", {
-    "product_buy": 10.0, "add_to_cart": 3.0, "remove_from_cart": 1.0,
-    "page_visit": 1.0, "search_query": 0.0,
-})
+SVDPQ_ENABLED          = _cfg["svdpq_enabled"]
+SVDPQ_T                = _cfg["svdpq_t"]
+SVDPQ_V                = _cfg["svdpq_v"]
+ITEM_HEAD_TOP_K        = _cfg["item_head_top_k"]
+SVDPQ_BINNING          = _cfg["svdpq_binning"]
+SVDPQ_NOISE_STD        = _cfg["svdpq_noise_std"]
+SVDPQ_MIN_INTERACTIONS = _cfg["svdpq_min_interactions"]
+SVDPQ_EVENT_WEIGHTS    = _cfg["svdpq_event_weights"]
 
 def _load_n_categories() -> int:
     """Load n_categories from cat2idx.joblib if available (built by preprocess.py)."""
@@ -91,16 +89,16 @@ N_CATEGORIES = _load_n_categories()
 # Derived: unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-_MODEL_VARIANT = "svdpq" if SVDPQ_ENABLED else "hier"
+_MODEL_VARIANT = f"svdpq_t{SVDPQ_T}v{SVDPQ_V}" if SVDPQ_ENABLED else "hier"
 MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_{_MODEL_VARIANT}"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/
 
 #Evaluation model (independent of training config)
-EVAL_MODEL_NAME  = _cfg.get("eval_model", MODEL_NAME)   # defaults to current train model
+EVAL_MODEL_NAME  = _cfg["eval_model"]
 EVAL_MODEL_SUBDIR = MODEL_DIR / EVAL_MODEL_NAME
 
 #GRU4Rec downstream evaluator
-GRU4REC_VOCAB_K     = _cfg.get("gru4rec_vocab_k", 50000)
+GRU4REC_VOCAB_K     = _cfg["gru4rec_vocab_k"]
 GRU4REC_EMBED_DIM   = _cfg["gru4rec_embed_dim"]
 GRU4REC_HIDDEN_DIM  = _cfg["gru4rec_hidden_dim"]
 GRU4REC_MAX_EPOCHS  = _cfg["gru4rec_max_epochs"]
