@@ -259,13 +259,7 @@ def build_svdpq_tokens() -> np.ndarray:
         tokens, E, item_nnz, SVDPQ_MIN_INTERACTIONS, SVDPQ_V, SVDPQ_BINNING,
     )
     print(f"{n_replaced:,}/{VOCAB_K:,} SKUs ({n_replaced/VOCAB_K*100:.1f}%) replaced with category centroid.")
-
-    print("Applying token dimension offsetting...")
-    for k in range(SVDPQ_T):
-        # We add 1 so that the absolute lowest token ID is 1 (reserving 0 for PAD)
-        tokens[:, k] = tokens[:, k] + (k * SVDPQ_V) + 1
     # Zero out PAD row (index 0) — tokens there should never be trained against
-    # Because we added + 1 above, PAD (0) is completely isolated.
     tokens[0] = 0
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
