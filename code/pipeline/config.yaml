@@ -45,6 +45,10 @@ svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
 item_head_top_k:        100        # items kept from item head at inference (affects both ItemHead and SVDPQItemHead)
+
+# Inference sampling temperatures
+infer_temperature:      1.0        # action / category / temporal heads
+infer_item_temperature: 15.0        # item head (SVD-PQ Hamming score or flat pool softmax)
 svdpq_binning:          quantile   # quantile | uniform , quantile seems better; offers even bin sizes
 svdpq_noise_std:        0.00001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
 svdpq_min_interactions: 2          # below this -> category-centroid cold-start fallback, # based on : notebooks/interactions.py
