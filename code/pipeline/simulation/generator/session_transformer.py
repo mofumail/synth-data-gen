@@ -148,10 +148,9 @@ class ItemHead(nn.Module):
         cond = h_t + action_cond(action_t)
     """
 
-    def __init__(self, d_model: int, vocab_size: int, n_categories: int = 0, top_k: int = 100):
+    def __init__(self, d_model: int, vocab_size: int, n_categories: int = 0):
         super().__init__()
         self.fc          = nn.Linear(d_model, vocab_size)
-        self.top_k       = top_k
         self.action_cond = nn.Embedding(N_ACTIONS, d_model)
         if n_categories > 0:
             self.category_cond = nn.Embedding(n_categories, d_model, padding_idx=0)
@@ -224,11 +223,10 @@ class SVDPQItemHead(nn.Module):
     sku_tokens : [V, t] long buffer, populated via register_sku_tokens().
     """
 
-    def __init__(self, d_model: int, t: int, v: int, n_categories: int = 0, top_k: int = 100):
+    def __init__(self, d_model: int, t: int, v: int, n_categories: int = 0):
         super().__init__()
         self.t = t
         self.v = v
-        self.top_k = top_k
         # One matmul producing all t*v logits; reshape to [M, t, v].
         self.fc            = nn.Linear(d_model, t * v)
         self.action_cond   = nn.Embedding(N_ACTIONS, d_model)
@@ -354,7 +352,6 @@ class SessionTransformer(nn.Module):
         sku_tokens_table: Optional[np.ndarray] = None, # [V, svdpq_t] int, 0=PAD row
         svdpq_t: int = 0,                              # tokens per item (0 = disabled)
         svdpq_v: int = 0,                              # bins per dim
-        item_head_top_k: int = 100,                    # items kept from item head at inference
     ):
         super().__init__()
         self.d_model      = d_model
@@ -423,14 +420,12 @@ class SessionTransformer(nn.Module):
         if self.svdpq_enabled:
             self.item_head = SVDPQItemHead(
                 d_model, t=svdpq_t, v=svdpq_v,
-                n_categories=n_categories, top_k=item_head_top_k,
+                n_categories=n_categories,
             )
-            # Test
             if sku_tokens_table is not None:
                 self.item_head.register_sku_tokens(torch.as_tensor(sku_tokens_table, dtype=torch.long))
-                # end test
         else:
-            self.item_head = ItemHead(d_model, vocab_size, n_categories=n_categories, top_k=item_head_top_k)
+            self.item_head = ItemHead(d_model, vocab_size, n_categories=n_categories)
         self.temporal_head = TemporalHead(d_model, n_temporal_bins)
 
         # Populated at inference time via set_cat_sku_pools()
@@ -538,7 +533,7 @@ class SessionTransformer(nn.Module):
 
 
     # Autoregressive inference
-    # Batched autoregressive inference with KV cache
+    # Batched autoregressive inference
 
     @torch.no_grad()
     def infer_batch(
@@ -546,6 +541,7 @@ class SessionTransformer(nn.Module):
         batch_inputs: List[tuple],  # [(client_id, sku, start_dt, history), ...]
         max_steps: int = 50,
         temperature: float = 1.0,
+        item_temperature: float = 1.0,
     ) -> List[List[dict]]:
         """
         Batched autoregressive inference.
@@ -557,18 +553,21 @@ class SessionTransformer(nn.Module):
         default), so no hand-rolled KV cache is needed at this sequence length.
 
         Args:
-        batch_inputs : list of (client_id, sku, start_dt, history) tuples
-        max_steps    : max events per session before forced stop
-        temperature  : sampling temperature
+        batch_inputs     : list of (client_id, sku, start_dt, history) tuples
+        max_steps        : max events per session before forced stop
+        temperature      : sampling temperature for action/category/temporal heads
+        item_temperature : sampling temperature for the item head
 
         Returns:
         List[List[dict]] - one event-dict list per input
         """
+
         self.eval()
         device  = next(self.parameters()).device
         B       = len(batch_inputs)
         sku2idx = getattr(self, "_sku2idx", {})
         idx2sku = getattr(self, "_idx2sku", {})
+        print(f"Temperature used: ", item_temperature)
 
         autocast_ctx = (
             torch.autocast("cuda", dtype=torch.bfloat16)
@@ -659,11 +658,13 @@ class SessionTransformer(nn.Module):
                                 # Test with dynamic poolsize,
                                 # Think larger SKU pools might be part of the reason item div fails
                                 # Would be stupid if it was an old OOM measure
-                                k_fb = min(self.item_head.top_k * (len(pool) // 100 + 1), len(pool))
+                                # k_fb = min(self.item_head.top_k * (len(pool) // 100 + 1), len(pool))
+                                # Can simplify to
+                                k_fb = len(pool)
 
 
                                 top_v, top_idx = match.topk(k_fb)
-                                probs = F.softmax(top_v.float() / max(15.0, 1e-6), dim=-1) #TODO: testing high temp, change back later
+                                probs = F.softmax(top_v.float() / max(item_temperature, 1e-6), dim=-1) # Item head temp.
                                 item_result[m] = pool[top_idx[int(torch.multinomial(probs, 1).item())]]
                             else:
                                 # No pool for predicted category: fall back to PAD
@@ -675,24 +676,19 @@ class SessionTransformer(nn.Module):
                             a_m  = a_item[m:m+1]
                             c_m  = c_idxs[m:m+1]
                             if pool is not None and len(pool) > 0:
-                                pool_k = pool[: min(self.item_head.top_k, len(pool))]
-                                w_pool = self.item_head.fc.weight.index_select(0, pool_k)
-                                b_pool = self.item_head.fc.bias.index_select(0, pool_k)
+                                w_pool = self.item_head.fc.weight.index_select(0, pool)
+                                b_pool = self.item_head.fc.bias.index_select(0, pool)
                                 cond   = (
                                     h_m
                                     + self.item_head.action_cond(a_m)
                                     + self.item_head.category_cond(c_m)
                                 )
-                                logits = (cond @ w_pool.t() + b_pool) / temperature
+                                logits = (cond @ w_pool.t() + b_pool) / item_temperature
                                 probs  = F.softmax(logits.float(), dim=-1)
-                                item_result[m] = pool_k[int(torch.multinomial(probs, 1).item())]
+                                item_result[m] = pool[int(torch.multinomial(probs, 1).item())]
                             else:
-                                # Fallback: global top-k
-                                i_logits = self.item_head(h_m, a_m, c_m) / temperature
-                                k_fb     = min(self.item_head.top_k, self.vocab_size)
-                                topk_v, topk_ids = torch.topk(i_logits, k_fb, dim=-1)
-                                probs    = F.softmax(topk_v.float(), dim=-1)
-                                item_result[m] = topk_ids[0, int(torch.multinomial(probs, 1).item())]
+                                # No pool for predicted category: fall back to PAD
+                                item_result[m] = 0
                     i_idxs[is_item] = item_result
                     c_full[is_item] = c_idxs
 
@@ -768,7 +764,6 @@ class SessionTransformer(nn.Module):
                 "svdpq_enabled":   self.svdpq_enabled,
                 "svdpq_t":         self.item_head.t if self.svdpq_enabled else 0,
                 "svdpq_v":         self.item_head.v if self.svdpq_enabled else 0,
-                "item_head_top_k": self.item_head.top_k,
             },
         }, path)
         print(f"  SessionTransformer saved ->{path}")
@@ -820,7 +815,6 @@ class SessionTransformer(nn.Module):
             sku_tokens_table  = sku_tokens_tbl,
             svdpq_t           = cfg.get("svdpq_t", 0),
             svdpq_v           = cfg.get("svdpq_v", 0),
-            item_head_top_k   = cfg.get("item_head_top_k", 100),
         )
 
         # test

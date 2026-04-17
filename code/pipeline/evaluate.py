@@ -35,7 +35,7 @@ import time
 import torch
 from collections import defaultdict
 
-from config import MODEL_DIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR
+from config import MODEL_DIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR, TRAIN_MAX_LENGTH
 from evaluation.fidelity import FidelityEvaluator
 from evaluation.orchestrator import EvaluationOrchestrator
 from evaluation.reference import RealDataLoader, ReferenceProfiler, ReferenceStore
@@ -180,6 +180,27 @@ def evaluate(args):
             print(f"    {c.fidelity_metric:<20} r={c.correlation:+.3f}  p={c.p_value:.3f} {sig}")
 
 
+def _print_session_length_stats(sessions, label: str, cap: int) -> None:
+    """Distribution of raw session lengths + how much tail is lost to the train_max_length cap."""
+    import numpy as np
+    lengths = np.fromiter((len(s) for s in sessions), dtype=np.int64, count=len(sessions))
+    n = lengths.size
+    if n == 0:
+        print(f"\n Session length stats [{label}]: <empty>")
+        return
+    truncated = int((lengths > cap).sum())
+    trunc_events_kept = int(np.minimum(lengths, cap).sum())
+    total_events      = int(lengths.sum())
+    print(f"\n Session length stats [{label}] (n={n:,}) ")
+    print(f"  mean={lengths.mean():.2f}  median={int(np.median(lengths))}  "
+          f"min={lengths.min()}  max={lengths.max()}")
+    print(f"  pct: p50={int(np.percentile(lengths,50))}  p75={int(np.percentile(lengths,75))}  "
+          f"p90={int(np.percentile(lengths,90))}  p95={int(np.percentile(lengths,95))}  "
+          f"p99={int(np.percentile(lengths,99))}")
+    print(f"  cap={cap}: {truncated:,}/{n:,} sessions ({100*truncated/n:.2f}%) truncated; "
+          f"{100*(total_events-trunc_events_kept)/max(total_events,1):.2f}% of all events lost to cap")
+
+
 def run_fidelity_only(args):
     """Fast fidelity-only path: generate n_sessions, compute fidelity vs train + val, print."""
     t0 = time.time()
@@ -192,6 +213,9 @@ def run_fidelity_only(args):
         max_train_sessions=args.max_train,
         max_val_sessions=args.max_val,
     )
+
+    _print_session_length_stats(real_data.train_split, "train", TRAIN_MAX_LENGTH)
+    _print_session_length_stats(real_data.val_split,   "val",   TRAIN_MAX_LENGTH)
 
     ref_store, val_ref_store = build_ref_store(real_data)
 

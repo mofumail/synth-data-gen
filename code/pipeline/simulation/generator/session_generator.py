@@ -23,7 +23,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from config import DS_START, HISTORY_WINDOW, VOCAB_K
+from config import DS_START, HISTORY_WINDOW, VOCAB_K, INFER_TEMPERATURE, INFER_ITEM_TEMPERATURE
 from simulation.validity import ValidityLayer
 from simulation.generator.session_transformer import SessionTransformer
 
@@ -49,6 +49,8 @@ class SessionGenerator:
         identity_sampler_path: Optional[str] = None,
         device: str = "cpu",
         batch_size: int = 512,
+        temperature: float = INFER_TEMPERATURE,
+        item_temperature: float = INFER_ITEM_TEMPERATURE,
     ):
         self.model_path            = str(model_path)
         self.validity_layer        = validity_layer
@@ -56,6 +58,8 @@ class SessionGenerator:
         self.identity_sampler_path = identity_sampler_path
         self.device                = device
         self.batch_size            = batch_size
+        self.temperature           = temperature
+        self.item_temperature      = item_temperature
         self._model                = None    # loaded lazily
         self._sampler              = None    # loaded lazily
         # Accumulates generated sessions per user across generate() calls.
@@ -99,7 +103,8 @@ class SessionGenerator:
         start_dt,
         history: Optional[List[dict]] = None,
         max_steps: int = 50,
-        temperature: float = 1.0,
+        temperature: Optional[float] = None,
+        item_temperature: Optional[float] = None,
         apply_constraints: bool = True,
     ) -> List[dict]:
         """
@@ -114,7 +119,8 @@ class SessionGenerator:
             start_dt: session start datetime
             history: past event dicts for cross-session conditioning
             max_steps: max events before forced stop
-            temperature: sampling temperature
+            temperature: sampling temperature (overrides self.temperature when given)
+            item_temperature: item head temperature (overrides self.item_temperature when given)
             apply_constraints: run ValidityLayer post-filter
 
         Returns:
@@ -124,10 +130,13 @@ class SessionGenerator:
         if self._model is None:
             self._load_model()
 
+        temp      = temperature      if temperature      is not None else self.temperature
+        item_temp = item_temperature if item_temperature is not None else self.item_temperature
         events = self._model.infer_batch(
             [(client_id, sku, start_dt, history)],
             max_steps=max_steps,
-            temperature=temperature,
+            temperature=temp,
+            item_temperature=item_temp,
         )[0]
 
         if apply_constraints and events:
@@ -213,7 +222,11 @@ class SessionGenerator:
         for start in tqdm(range(0, n_sessions, self.batch_size), total=n_batches,
                           desc="  Transformer gen", unit="batch", leave=True, file=sys.stdout):
             chunk   = batch_inputs[start : start + self.batch_size]
-            results = self._model.infer_batch(chunk)
+            results = self._model.infer_batch(
+                chunk,
+                temperature=self.temperature,
+                item_temperature=self.item_temperature,
+            )
             if apply_constraints:
                 results = [
                     s if (s and self.validity_layer.validate(s)) else []

@@ -69,11 +69,14 @@ CATEGORY_RARE_THRESHOLD = _cfg["category_rare_threshold"]
 SVDPQ_ENABLED          = _cfg["svdpq_enabled"]
 SVDPQ_T                = _cfg["svdpq_t"]
 SVDPQ_V                = _cfg["svdpq_v"]
-ITEM_HEAD_TOP_K        = _cfg["item_head_top_k"]
 SVDPQ_BINNING          = _cfg["svdpq_binning"]
 SVDPQ_NOISE_STD        = _cfg["svdpq_noise_std"]
 SVDPQ_MIN_INTERACTIONS = _cfg["svdpq_min_interactions"]
 SVDPQ_EVENT_WEIGHTS    = _cfg["svdpq_event_weights"]
+
+#Inference sampling
+INFER_TEMPERATURE      = _cfg["infer_temperature"]
+INFER_ITEM_TEMPERATURE = _cfg["infer_item_temperature"]
 
 def _load_n_categories() -> int:
     """Load n_categories from cat2idx.joblib if available (built by preprocess.py)."""
