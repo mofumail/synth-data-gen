@@ -567,7 +567,6 @@ class SessionTransformer(nn.Module):
         B       = len(batch_inputs)
         sku2idx = getattr(self, "_sku2idx", {})
         idx2sku = getattr(self, "_idx2sku", {})
-        print(f"Temperature used: ", item_temperature)
 
         autocast_ctx = (
             torch.autocast("cuda", dtype=torch.bfloat16)
