@@ -46,7 +46,7 @@ class ReportGenerator:
             ("Cart abandon. delta", "cart_abandonment_delta",   "[0, 1]", "↓ lower is better"),
         ]
         BIAS_METRICS = [
-            ("Item coverage",     "item_coverage",          "[0, 1]", "↑ higher is better"),
+            ("Item coverage",     "item_coverage",          "ratio",  "1.0 = synth matches real at same N"),
             ("JSD (popularity)",  "popularity_jsd",         "[0, 1]", "↓ lower is better"),
             ("Gini coeff. delta", "gini_coefficient_delta", "[0, 1]", "↓ lower is better"),
         ]

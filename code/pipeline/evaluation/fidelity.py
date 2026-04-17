@@ -119,29 +119,62 @@ class FidelityEvaluator:
         )
         return n / len(synth_sessions)
 
-    def compute_bias_metrics(self, sessions: list, ref_store: ReferenceStore) -> BiasResult:
+    def compute_bias_metrics(
+        self,
+        sessions: list,
+        ref_store: ReferenceStore,
+        matched_real_sample: list | None = None,
+    ) -> BiasResult:
+        """
+        When `matched_real_sample` is given (real sessions subsampled to the same
+        N as `sessions`), coverage and Gini use that matched sample as the
+        reference — otherwise small-N synth is unfairly penalised on coverage
+        (unique_SKUs / VOCAB_K) and Gini (synth distribution full of zeros vs a
+        5M-session reference).
+
+        Matched-N semantics:
+            item_coverage = unique_synth / unique_real_matched  (1.0 = parity)
+            gini_delta    = |gini(synth full pop) - gini(real matched full pop)|
+        """
         sku_counts: dict = defaultdict(int)
         for session in sessions:
             for ev in session:
                 sku = ev.get("sku")
                 if sku is not None:
                     sku_counts[sku] += 1
+        synth_unique = len(sku_counts)
 
-        coverage = len(sku_counts) / VOCAB_K if VOCAB_K > 0 else 0.0
+        if matched_real_sample is not None:
+            real_sku_counts: dict = defaultdict(int)
+            for session in matched_real_sample:
+                for ev in session:
+                    sku = ev.get("sku")
+                    if sku is not None:
+                        real_sku_counts[sku] += 1
+            real_unique = len(real_sku_counts)
+            coverage    = (synth_unique / real_unique) if real_unique > 0 else 0.0
+
+            real_total  = sum(real_sku_counts.values()) or 1
+            real_gini   = _gini(v / real_total for v in real_sku_counts.values())
+
+            synth_total_all = sum(sku_counts.values()) or 1
+            synth_gini      = _gini(v / synth_total_all for v in sku_counts.values())
+        else:
+            coverage  = synth_unique / VOCAB_K if VOCAB_K > 0 else 0.0
+            ref_pop   = ref_store.bias.popularity_distribution
+            real_gini = _gini(ref_pop.values())
+            synth_freq  = np.array([sku_counts.get(sku, 0) for sku in ref_pop], dtype=np.float64)
+            synth_total = synth_freq.sum() or 1.0
+            synth_gini  = _gini(synth_freq / synth_total)
+
+        gini_delta = abs(synth_gini - real_gini)
 
         # JSD between synth and real popularity distributions (over top-1000 real items).
-        # Restricted to reference keys so both distributions live in the same item space.
-        ref_pop = ref_store.bias.popularity_distribution   # {sku: fraction}
-        total   = sum(sku_counts.values()) or 1
+        # Shape comparison — size-robust, uses full ref_store even when matched.
+        ref_pop = ref_store.bias.popularity_distribution
+        total     = sum(sku_counts.values()) or 1
         synth_pop = {sku: sku_counts.get(sku, 0) / total for sku in ref_pop}
-        pop_jsd = self.compute_jsd(ref_pop, synth_pop)
-
-        # Gini coefficient delta (over the same top-1000 item space)
-        real_gini  = _gini(ref_pop.values())
-        synth_freq = np.array([sku_counts.get(sku, 0) for sku in ref_pop], dtype=np.float64)
-        synth_total = synth_freq.sum() or 1.0
-        synth_gini  = _gini(synth_freq / synth_total)
-        gini_delta  = abs(synth_gini - real_gini)
+        pop_jsd   = self.compute_jsd(ref_pop, synth_pop)
 
         return BiasResult(
             item_coverage          = coverage,
@@ -154,9 +187,24 @@ class FidelityEvaluator:
         real_data,
         synth_sessions: list,
         ref_store: ReferenceStore,
+        match_n: bool = True,
     ) -> FidelityResult:
-        """Compute all eight fidelity metrics + bias against ref_store."""
+        """
+        Compute all eight fidelity metrics + bias against ref_store.
+
+        match_n: if True, coverage and Gini are computed against a random
+            subsample of real_data.train_split with size = len(synth_sessions).
+            Keeps bias metrics comparable when synth N << reference N (5M).
+        """
         profiler = ReferenceProfiler()
+
+        matched = None
+        if match_n and synth_sessions:
+            pool = real_data.train_split
+            k    = min(len(synth_sessions), len(pool))
+            rng  = np.random.default_rng(0)
+            idx  = rng.choice(len(pool), size=k, replace=False)
+            matched = [pool[i] for i in idx]
 
         # 1. JSD - action distribution
         synth_action_counts = defaultdict(int)
@@ -209,7 +257,7 @@ class FidelityEvaluator:
             l1_action_bigrams      = l1_action,
             l1_item_bigrams        = l1_item,
             sample_diversity       = diversity,
-            bias                   = self.compute_bias_metrics(synth_sessions, ref_store),
+            bias                   = self.compute_bias_metrics(synth_sessions, ref_store, matched_real_sample=matched),
             ks_temporal_delta      = ks_temporal,
             conversion_rate_delta  = conv_delta,
             cart_abandonment_delta = aban_delta,
