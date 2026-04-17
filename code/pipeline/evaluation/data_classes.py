@@ -17,6 +17,8 @@ class BiasResult:
     item_coverage: float          # unique_synth_SKUs / unique_real_SKUs_at_matched_N (1.0 = parity)
     popularity_jsd: float         # JSD between real and generated item popularity
     gini_coefficient_delta: float = 0.0   # |gini(synth) - gini(real_matched)| over full synth/real supports
+    unique_synth_skus: float = 0.0        # raw unique-SKU count in synth (recover catalog-% = this / VOCAB_K)
+    unique_real_matched_skus: float = 0.0 # raw unique-SKU count in the matched real sample (denom of item_coverage)
 
 
 @dataclass

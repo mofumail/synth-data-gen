@@ -279,6 +279,20 @@ class SVDPQItemHead(nn.Module):
         logits = self.fc(cond).view(-1, self.t, self.v)
         return logits.argmax(dim=-1)
 
+    def sample_tokens(
+        self,
+        h_t: torch.Tensor,
+        action_t: torch.Tensor,
+        category_t: Optional[torch.Tensor] = None,
+        temperature: float = 1.0,
+    ) -> torch.Tensor:
+        """Sample [M, t] tokens from per-dim softmax(logits / temperature)."""
+        cond = self._cond(h_t, action_t, category_t)
+        logits = self.fc(cond).view(-1, self.t, self.v)
+        probs  = F.softmax(logits.float() / max(temperature, 1e-6), dim=-1)
+        M, t, v = probs.shape
+        return torch.multinomial(probs.reshape(M * t, v), 1).view(M, t)
+
 
 class TemporalHead(nn.Module):
     """
@@ -634,6 +648,12 @@ class SessionTransformer(nn.Module):
                     a_item = a_idxs[is_item]
 
                     cat_logits = self.category_head(h_item, a_item) / temperature
+                    # Mask categories with no SKU pool (otherwise we'd emit a
+                    # PAD-sku event and ValidityLayer would drop the session).
+                    if hasattr(self, "empty_cat_mask"):
+                        cat_logits = cat_logits.masked_fill(
+                            self.empty_cat_mask.unsqueeze(0), float("-inf"),
+                        )
                     cat_probs  = F.softmax(cat_logits.float(), dim=-1)
                     c_idxs     = torch.multinomial(cat_probs, 1).squeeze(1)
 
@@ -642,52 +662,41 @@ class SessionTransformer(nn.Module):
                     item_result = torch.zeros(is_item.sum(), dtype=torch.long, device=device)
 
                     if isinstance(self.item_head, SVDPQItemHead):
-                        # SVD-PQ inference: predict t tokens, then pick the in-category
-                        # SKU with highest token-match count (Hamming-based score).
-                        pred_tokens = self.item_head.predict_tokens(
-                            h_item, a_item, c_idxs,
+                        # SVD-PQ inference: sample t tokens (honors item_temperature),
+                        # then pick the in-category SKU with highest token-match count.
+                        pred_tokens = self.item_head.sample_tokens(
+                            h_item, a_item, c_idxs, temperature=item_temperature,
                         )  # [M, t]
                         for m, ci in enumerate(c_list):
                             pool = pools[ci] if pools is not None and ci < len(pools) else None
-                            if pool is not None and len(pool) > 0:
-                                pool_tokens = self.item_head.sku_tokens[pool]    # [P, t]
-                                match = (pool_tokens == pred_tokens[m]).sum(dim=-1)  # [P]
-
-                                #TODO
-                                # Test with dynamic poolsize,
-                                # Think larger SKU pools might be part of the reason item div fails
-                                # Would be stupid if it was an old OOM measure
-                                # k_fb = min(self.item_head.top_k * (len(pool) // 100 + 1), len(pool))
-                                # Can simplify to
-                                k_fb = len(pool)
-
-
-                                top_v, top_idx = match.topk(k_fb)
-                                probs = F.softmax(top_v.float() / max(item_temperature, 1e-6), dim=-1) # Item head temp.
-                                item_result[m] = pool[top_idx[int(torch.multinomial(probs, 1).item())]]
-                            else:
-                                # No pool for predicted category: fall back to PAD
-                                item_result[m] = 0
+                            assert pool is not None and len(pool) > 0, (
+                                f"empty_cat_mask failed: category {ci} has no SKU pool"
+                            )
+                            pool_tokens = self.item_head.sku_tokens[pool]    # [P, t]
+                            match = (pool_tokens == pred_tokens[m]).sum(dim=-1)  # [P]
+                            k_fb = len(pool)
+                            top_v, top_idx = match.topk(k_fb)
+                            probs = F.softmax(top_v.float() / max(item_temperature, 1e-6), dim=-1)
+                            item_result[m] = pool[top_idx[int(torch.multinomial(probs, 1).item())]]
                     else:
                         for m, ci in enumerate(c_list):
                             pool = pools[ci] if pools is not None and ci < len(pools) else None
+                            assert pool is not None and len(pool) > 0, (
+                                f"empty_cat_mask failed: category {ci} has no SKU pool"
+                            )
                             h_m  = h_item[m:m+1]
                             a_m  = a_item[m:m+1]
                             c_m  = c_idxs[m:m+1]
-                            if pool is not None and len(pool) > 0:
-                                w_pool = self.item_head.fc.weight.index_select(0, pool)
-                                b_pool = self.item_head.fc.bias.index_select(0, pool)
-                                cond   = (
-                                    h_m
-                                    + self.item_head.action_cond(a_m)
-                                    + self.item_head.category_cond(c_m)
-                                )
-                                logits = (cond @ w_pool.t() + b_pool) / item_temperature
-                                probs  = F.softmax(logits.float(), dim=-1)
-                                item_result[m] = pool[int(torch.multinomial(probs, 1).item())]
-                            else:
-                                # No pool for predicted category: fall back to PAD
-                                item_result[m] = 0
+                            w_pool = self.item_head.fc.weight.index_select(0, pool)
+                            b_pool = self.item_head.fc.bias.index_select(0, pool)
+                            cond   = (
+                                h_m
+                                + self.item_head.action_cond(a_m)
+                                + self.item_head.category_cond(c_m)
+                            )
+                            logits = (cond @ w_pool.t() + b_pool) / item_temperature
+                            probs  = F.softmax(logits.float(), dim=-1)
+                            item_result[m] = pool[int(torch.multinomial(probs, 1).item())]
                     i_idxs[is_item] = item_result
                     c_full[is_item] = c_idxs
 
@@ -737,12 +746,23 @@ class SessionTransformer(nn.Module):
         Register per-category SKU index pools for hierarchical inference.
         cat_sku_pools: list[np.ndarray] indexed by dense_cat_idx (from get_cat_vocab).
         Stored as a list of tensors on the given device.
+
+        Also registers `empty_cat_mask` ([n_categories] bool, True = unsamplable)
+        so the category sampler cannot pick a category with no SKU pool (would
+        otherwise emit a PAD event and get the whole session dropped).
         """
         self._cat_sku_pools = [
             torch.from_numpy(p).long().to(device) if len(p) > 0
             else torch.tensor([], dtype=torch.long, device=device)
             for p in cat_sku_pools
         ]
+        n_cats = self.n_categories
+        mask = torch.zeros(n_cats, dtype=torch.bool, device=device)
+        for i in range(n_cats):
+            if i >= len(self._cat_sku_pools) or self._cat_sku_pools[i].numel() == 0:
+                mask[i] = True
+        mask[0] = True                  # PAD (0) is never samplable
+        self.register_buffer("empty_cat_mask", mask, persistent=False)
 
     def save(self, path) -> None:
         path = Path(path)

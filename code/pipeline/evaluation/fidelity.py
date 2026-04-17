@@ -161,6 +161,7 @@ class FidelityEvaluator:
             synth_gini      = _gini(v / synth_total_all for v in sku_counts.values())
         else:
             coverage  = synth_unique / VOCAB_K if VOCAB_K > 0 else 0.0
+            real_unique = VOCAB_K                 # denominator for the unmatched branch
             ref_pop   = ref_store.bias.popularity_distribution
             real_gini = _gini(ref_pop.values())
             synth_freq  = np.array([sku_counts.get(sku, 0) for sku in ref_pop], dtype=np.float64)
@@ -177,9 +178,11 @@ class FidelityEvaluator:
         pop_jsd   = self.compute_jsd(ref_pop, synth_pop)
 
         return BiasResult(
-            item_coverage          = coverage,
-            popularity_jsd         = pop_jsd,
-            gini_coefficient_delta = gini_delta,
+            item_coverage            = coverage,
+            popularity_jsd           = pop_jsd,
+            gini_coefficient_delta   = gini_delta,
+            unique_synth_skus        = float(synth_unique),
+            unique_real_matched_skus = float(real_unique),
         )
 
     def evaluate(
@@ -188,19 +191,24 @@ class FidelityEvaluator:
         synth_sessions: list,
         ref_store: ReferenceStore,
         match_n: bool = True,
+        matched_source: list | None = None,
     ) -> FidelityResult:
         """
         Compute all eight fidelity metrics + bias against ref_store.
 
         match_n: if True, coverage and Gini are computed against a random
-            subsample of real_data.train_split with size = len(synth_sessions).
-            Keeps bias metrics comparable when synth N << reference N (5M).
+            subsample of `matched_source` (defaults to real_data.train_split)
+            with size = len(synth_sessions). Keeps bias metrics comparable
+            when synth N << reference N.
+        matched_source: list of real sessions to subsample from. Must match
+            the split that `ref_store` was profiled from (pass val_split for a
+            val_ref_store, train_split for a train ref_store).
         """
         profiler = ReferenceProfiler()
 
         matched = None
         if match_n and synth_sessions:
-            pool = real_data.train_split
+            pool = matched_source if matched_source is not None else real_data.train_split
             k    = min(len(synth_sessions), len(pool))
             rng  = np.random.default_rng(0)
             idx  = rng.choice(len(pool), size=k, replace=False)

@@ -137,13 +137,26 @@ class EvaluationOrchestrator:
 
         # --- Generate sessions ---
         print(f"  Generating {n_sessions} transformer sessions ...")
-        synth_T_raw  = primary_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=False)
+        synth_T_raw_all  = primary_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=False)
         if hasattr(primary_gen, "reset_registry"):
             primary_gen.reset_registry()   # clear invalid sessions before constrained pass
-        synth_T_post = primary_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
+        synth_T_post_all = primary_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
 
         print(f"  Generating {n_sessions} Markov sessions ...")
-        synth_M      = baseline_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
+        synth_M_all = baseline_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
+
+        # Filter empty-session placeholders before fidelity / TSTR / save.
+        # ValidityLayer leaves [] placeholders when a session fails constraints;
+        # feeding those downstream shrinks the effective training set and
+        # desyncs the matched-N coverage reference from the actual synth count.
+        # Validity metrics themselves still receive the raw (empties-included)
+        # lists — ValidityChecker filters internally to report per-session rates.
+        synth_T_post = [s for s in synth_T_post_all if s]
+        synth_M      = [s for s in synth_M_all      if s]
+        print(f"  synth_T_post: {len(synth_T_post):,}/{n_sessions:,} non-empty "
+              f"({100*len(synth_T_post)/n_sessions:.1f}%)")
+        print(f"  synth_M     : {len(synth_M):,}/{n_sessions:,} non-empty "
+              f"({100*len(synth_M)/n_sessions:.1f}%)")
 
         # --- Save synthetic datasets for offline exploration ---
         SYNTH_DIR.mkdir(parents=True, exist_ok=True)
@@ -163,21 +176,37 @@ class EvaluationOrchestrator:
         print(f"  GPU after transformer cleanup: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated", flush=True)
 
         # --- Fidelity (primary generator, constrained) ---
+        # matched_source must match the split ref_store was profiled from,
+        # otherwise matched-N coverage / Gini compares against the wrong pool.
         print("  Computing fidelity vs train ...")
-        fidelity_train = fid_ev.evaluate(real_data, synth_T_post, ref_store)
+        fidelity_train = fid_ev.evaluate(
+            real_data, synth_T_post, ref_store,
+            matched_source=real_data.train_split,
+        )
         print("  Computing fidelity vs val (generalization check) ...")
-        fidelity_val   = fid_ev.evaluate(real_data, synth_T_post, val_ref_store)
+        fidelity_val = fid_ev.evaluate(
+            real_data, synth_T_post, val_ref_store,
+            matched_source=real_data.val_split,
+        )
 
         # --- Fidelity (markov baseline) ---
         print("  Computing Markov fidelity vs train ...")
-        fidelity_markov_train = fid_ev.evaluate(real_data, synth_M, ref_store)
+        fidelity_markov_train = fid_ev.evaluate(
+            real_data, synth_M, ref_store,
+            matched_source=real_data.train_split,
+        )
         print("  Computing Markov fidelity vs val ...")
-        fidelity_markov_val   = fid_ev.evaluate(real_data, synth_M, val_ref_store)
+        fidelity_markov_val = fid_ev.evaluate(
+            real_data, synth_M, val_ref_store,
+            matched_source=real_data.val_split,
+        )
 
         # --- Validity ---
+        # Raw (empties-included) lists: ValidityChecker.evaluate filters
+        # internally and reports per-session rates, which is what we want.
         print("  Computing validity ...")
-        validity_pre  = val_chk.evaluate(synth_T_raw)
-        validity_post = val_chk.evaluate(synth_T_post)
+        validity_pre  = val_chk.evaluate(synth_T_raw_all)
+        validity_post = val_chk.evaluate(synth_T_post_all)
 
         # --- Downstream utility ---
         # Sample exactly n_sessions real sessions for TRTR so training set size is
@@ -193,10 +222,10 @@ class EvaluationOrchestrator:
         self._save_sessions(real_train_sample, SYNTH_DIR / f"real_train-seed{seed}-{n_real}.parquet")
 
         print(f"  Computing downstream utility (n_sessions={n_sessions}, TRTR sample={n_real}) ...")
-        # Use shared-vocab OOV filtering so all three conditions evaluate on identical
-        # test pairs. TRTR vocab is the reference: only GT items present in the real
-        # training distribution are evaluated, preventing TSTR conditions from looking
-        # artificially strong due to a smaller/easier per-condition test subset.
+        # Shared-vocab OOV filter uses the *intersection* of all three conditions'
+        # train vocabs, not TRTR's. Using TRTR as reference systematically dings
+        # TSTR when a gt item sits in TRTR ∩ real_test but not in TSTR's vocab —
+        # that pair auto-misses for TSTR but counts as a valid hit for TRTR.
         util_T, util_M, util_RR = down_ev.evaluate_all_shared_vocab(
             conditions=[
                 ("TSTR-T", synth_T_post),
@@ -205,14 +234,20 @@ class EvaluationOrchestrator:
             ],
             real_test      = downstream_split,
             seed           = seed,
-            reference_cond = "TRTR",
+            reference_cond = None,
         )
 
         # --- Fidelity of TRTR sample vs reference distributions ---
         print("  Computing TRTR fidelity vs train ...")
-        fidelity_trtr_train = fid_ev.evaluate(real_data, real_train_sample, ref_store)
+        fidelity_trtr_train = fid_ev.evaluate(
+            real_data, real_train_sample, ref_store,
+            matched_source=real_data.train_split,
+        )
         print("  Computing TRTR fidelity vs val ...")
-        fidelity_trtr_val   = fid_ev.evaluate(real_data, real_train_sample, val_ref_store)
+        fidelity_trtr_val = fid_ev.evaluate(
+            real_data, real_train_sample, val_ref_store,
+            matched_source=real_data.val_split,
+        )
 
         result = SeedResult(
             seed                  = seed,
@@ -251,9 +286,11 @@ class EvaluationOrchestrator:
                 l1_item_bigrams        = f("l1_item_bigrams"),
                 sample_diversity       = f("sample_diversity"),
                 bias=BiasResult(
-                    item_coverage          = float(fn([getattr(r, split_attr).bias.item_coverage          for r in seed_results])),
-                    popularity_jsd         = float(fn([getattr(r, split_attr).bias.popularity_jsd         for r in seed_results])),
-                    gini_coefficient_delta = float(fn([getattr(r, split_attr).bias.gini_coefficient_delta for r in seed_results])),
+                    item_coverage            = float(fn([getattr(r, split_attr).bias.item_coverage            for r in seed_results])),
+                    popularity_jsd           = float(fn([getattr(r, split_attr).bias.popularity_jsd           for r in seed_results])),
+                    gini_coefficient_delta   = float(fn([getattr(r, split_attr).bias.gini_coefficient_delta   for r in seed_results])),
+                    unique_synth_skus        = float(fn([getattr(r, split_attr).bias.unique_synth_skus        for r in seed_results])),
+                    unique_real_matched_skus = float(fn([getattr(r, split_attr).bias.unique_real_matched_skus for r in seed_results])),
                 ),
                 ks_temporal_delta      = f("ks_temporal_delta"),
                 conversion_rate_delta  = f("conversion_rate_delta"),

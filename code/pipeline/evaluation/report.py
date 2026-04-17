@@ -47,6 +47,8 @@ class ReportGenerator:
         ]
         BIAS_METRICS = [
             ("Item coverage",     "item_coverage",          "ratio",  "1.0 = synth matches real at same N"),
+            ("Unique SKUs (synth)",       "unique_synth_skus",        "count", "catalog-% = this / VOCAB_K"),
+            ("Unique SKUs (real matched)","unique_real_matched_skus", "count", "denom of Item coverage"),
             ("JSD (popularity)",  "popularity_jsd",         "[0, 1]", "↓ lower is better"),
             ("Gini coeff. delta", "gini_coefficient_delta", "[0, 1]", "↓ lower is better"),
         ]
