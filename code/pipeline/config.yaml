@@ -46,7 +46,7 @@ svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8,
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
 item_head_top_k:        100        # items kept from item head at inference (affects both ItemHead and SVDPQItemHead)
 svdpq_binning:          quantile   # quantile | uniform , quantile seems better; offers even bin sizes
-svdpq_noise_std:        0.0001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
+svdpq_noise_std:        0.00001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
 svdpq_min_interactions: 2          # below this -> category-centroid cold-start fallback, # based on : notebooks/interactions.py
 # The knee is somewhere inbetween 1 - 2
 # The jump from treshhold 1-2 is 27.3pp, to 29.8pp from 2-3

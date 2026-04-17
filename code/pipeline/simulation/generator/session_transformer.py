@@ -654,9 +654,16 @@ class SessionTransformer(nn.Module):
                             if pool is not None and len(pool) > 0:
                                 pool_tokens = self.item_head.sku_tokens[pool]    # [P, t]
                                 match = (pool_tokens == pred_tokens[m]).sum(dim=-1)  # [P]
-                                k_fb  = min(self.item_head.top_k, len(pool))
+
+                                #TODO
+                                # Test with dynamic poolsize,
+                                # Think larger SKU pools might be part of the reason item div fails
+                                # Would be stupid if it was an old OOM measure
+                                k_fb = min(self.item_head.top_k * (len(pool) // 100 + 1), len(pool))
+
+
                                 top_v, top_idx = match.topk(k_fb)
-                                probs = F.softmax(top_v.float() / max(temperature, 1e-6), dim=-1)
+                                probs = F.softmax(top_v.float() / max(15.0, 1e-6), dim=-1) #TODO: testing high temp, change back later
                                 item_result[m] = pool[top_idx[int(torch.multinomial(probs, 1).item())]]
                             else:
                                 # No pool for predicted category: fall back to PAD
@@ -716,6 +723,7 @@ class SessionTransformer(nn.Module):
                     "event_type": IDX2ACTION[a_idx],
                     "sku":        sku_out,
                     "timestamp":  current_dts[b],
+                    "category": int(c_full[b].item()) if is_item[b] else None,
                 })
 
             # Append the new token to the growing streams

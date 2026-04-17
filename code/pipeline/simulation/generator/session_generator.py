@@ -225,4 +225,13 @@ class SessionGenerator:
                     self._user_registry.setdefault(cid, []).extend(session)
             sessions.extend(results)
 
+        from collections import Counter
+        cat_counts = Counter()
+        for session in sessions:
+            for event in session:
+                if event.get("category"):
+                    cat_counts[event["category"]] += 1
+        print(f"\nUnique categories predicted: {len(cat_counts)}")
+        print(f"Top 10 categories: {cat_counts.most_common(10)}")
+
         return sessions
