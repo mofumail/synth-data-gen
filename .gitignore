@@ -129,3 +129,8 @@ code/pipeline/output/
 
 # Synerise
 code/recsys2025/
+
+# Local-only arrival simulation files
+code/pipeline/simulation/arrival/mmpp.py
+code/pipeline/simulation/arrival/tod.py
+code/notebooks/name_embedding_analysis.ipynb
