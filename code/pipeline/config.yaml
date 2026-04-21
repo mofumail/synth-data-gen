@@ -44,6 +44,11 @@ svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
 
+# Evaluation - folder name of the trained model to evaluate (under output/models/).
+# Must include the training timestamp suffix, e.g.
+#   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
+eval_model: session_transformer_d128_l4_h4_svdpq_t4v512
+
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
 infer_item_temperature: 1.3     # item head (SVD-PQ Hamming score or flat pool softmax)

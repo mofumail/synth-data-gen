@@ -27,11 +27,15 @@ Usage (smoke test):
     PYTHONPATH=. uv run python evaluate.py \\
         --max-train 10000 --max-val 2000 --n-sessions 500 --num-seeds 1
 
-Reports saved to OUTPUT_DIR/reports/ (HTML + JSON).
+Reports saved to output/models/<eval_model>/reports/report-<DDMMYY-HH-MM-SS>/
+(HTML + JSON). Each invocation creates a fresh report-<stamp>/ subfolder so
+prior runs are never overwritten.
 """
 
 import argparse
 import time
+from datetime import datetime
+
 import torch
 from collections import defaultdict
 
@@ -45,9 +49,21 @@ from simulation.generator.session_generator import SessionGenerator
 from simulation.validity import ValidityLayer
 
 
-REPORTS_DIR        = EVAL_MODEL_SUBDIR / "reports"
 REF_STORE_PATH     = OUTPUT_DIR / "reference_store.joblib"
 VAL_REF_STORE_PATH = OUTPUT_DIR / "val_reference_store.joblib"
+
+
+def _require_eval_model() -> None:
+    if EVAL_MODEL_SUBDIR is None:
+        raise RuntimeError(
+            "config.yaml must set `eval_model` to the folder name of the "
+            "trained model to evaluate (e.g. "
+            "session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18)."
+        )
+    if not EVAL_MODEL_SUBDIR.exists():
+        raise FileNotFoundError(
+            f"eval_model folder not found: {EVAL_MODEL_SUBDIR}"
+        )
 
 
 def build_ref_store(real_data) -> tuple:
@@ -111,6 +127,11 @@ def build_transformer_generator(ref_store: ReferenceStore) -> SessionGenerator:
 def evaluate(args):
     t0 = time.time()
 
+    _require_eval_model()
+    run_stamp   = datetime.now().strftime("%d%m%y-%H-%M-%S")
+    reports_dir = EVAL_MODEL_SUBDIR / "reports" / f"report-{run_stamp}"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
     # Identity sampler
     print("\nChecking identity sampler ...")
     ensure_identity_sampler()
@@ -153,15 +174,14 @@ def evaluate(args):
     )
 
     # Report
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
     reporter = ReportGenerator()
     html     = reporter.generate(aggregated)
-    reporter.save(html,       REPORTS_DIR / "evaluation_report.html")
-    reporter.serialize(aggregated, REPORTS_DIR / "evaluation_results.json")
+    reporter.save(html,       reports_dir / "evaluation_report.html")
+    reporter.serialize(aggregated, reports_dir / "evaluation_results.json")
 
     elapsed = time.time() - t0
     print(f"\nEvaluation complete in {elapsed:.1f}s")
-    print(f"Reports -> {REPORTS_DIR}")
+    print(f"Reports -> {reports_dir}")
 
     # Quick summary to stdout
     print("\nSummary ")
@@ -204,6 +224,8 @@ def _print_session_length_stats(sessions, label: str, cap: int) -> None:
 def run_fidelity_only(args):
     """Fast fidelity-only path: generate n_sessions, compute fidelity vs train + val, print."""
     t0 = time.time()
+
+    _require_eval_model()
 
     print("\nChecking identity sampler ...")
     ensure_identity_sampler()

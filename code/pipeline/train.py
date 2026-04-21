@@ -11,11 +11,13 @@ All hyperparameters are read from config.yaml.
 
 Usage: PYTHONPATH=. uv run python train.py
 
-Checkpoint saved to MODEL_SUBDIR/model.pt on val loss improvement.
-A config.yaml snapshot is written alongside the checkpoint.
+Each run writes to output/models/<MODEL_NAME>_<DDMMYY-HH-MM-SS>/; within a
+run, per-epoch "is_best" checkpoints overwrite model.pt / model.yaml inside
+that same folder. A config.yaml snapshot is written alongside the checkpoint.
 """
 
 import time
+from datetime import datetime
 from pathlib import Path
 
 import yaml
@@ -28,7 +30,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from config import (
-    MODEL_NAME, MODEL_SUBDIR, VOCAB_K, N_TEMPORAL_BINS, HISTORY_WINDOW,
+    MODEL_NAME, MODEL_DIR, VOCAB_K, N_TEMPORAL_BINS, HISTORY_WINDOW,
     TRAIN_EPOCHS, TRAIN_BATCH_SIZE, TRAIN_MAX_LENGTH,
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
     TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
@@ -56,17 +58,24 @@ def build_target_mask(lengths: torch.Tensor, T_out: int, device) -> torch.Tensor
 
 
 def train():
+    # Stamp the run once at start so every epoch writes into the same folder.
+    run_stamp  = datetime.now().strftime("%d%m%y-%H-%M-%S")
+    run_name   = f"{MODEL_NAME}_{run_stamp}"
+    run_subdir = MODEL_DIR / run_name
+    run_subdir.mkdir(parents=True, exist_ok=True)
+
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
+    print(f"Run:    {run_name}")
     print(f"Config: epochs={TRAIN_EPOCHS}, batch={TRAIN_BATCH_SIZE}, "
           f"d_model={TRAIN_D_MODEL}, layers={TRAIN_N_LAYERS}, heads={TRAIN_N_HEADS}, "
           f"lr={TRAIN_LR}, max_sessions={TRAIN_MAX_SESSIONS}, n_categories={N_CATEGORIES}")
 
     wandb.init(
         project="thesis-session-transformer",
-        name=MODEL_NAME,
+        name=run_name,
         config={
-            "model":           MODEL_NAME,
+            "model":           run_name,
             "epochs":          TRAIN_EPOCHS,
             "batch_size":      TRAIN_BATCH_SIZE,
             "max_length":      TRAIN_MAX_LENGTH,
@@ -171,7 +180,6 @@ def train():
     optimizer = AdamW(model.parameters(), lr=TRAIN_LR, weight_decay=1e-4)
     scheduler = CosineAnnealingLR(optimizer, T_max=TRAIN_EPOCHS * len(gen), eta_min=1e-6)
 
-    MODEL_SUBDIR.mkdir(parents=True, exist_ok=True)
     best_loss = float("inf")
 
     # Precomputed item-bearing action ids for torch.isin masking
@@ -362,8 +370,8 @@ def train():
 
         if is_best:
             best_loss = val_loss
-            ckpt_path = MODEL_SUBDIR / "model.pt"
-            cfg_path  = MODEL_SUBDIR / "model.yaml"
+            ckpt_path = run_subdir / "model.pt"
+            cfg_path  = run_subdir / "model.yaml"
             model.save(ckpt_path)
             # Save config snapshot alongside checkpoint for reproducibility
             snapshot = yaml.safe_load((Path(__file__).parent / "config.yaml").read_text())
@@ -378,7 +386,7 @@ def train():
             wandb.summary["best_epoch"]    = epoch
 
     print(f"\nTraining complete. Best val loss: {best_loss:.4f}")
-    print(f"Model saved to: {MODEL_SUBDIR / 'model.pt'}")
+    print(f"Model saved to: {run_subdir / 'model.pt'}")
     wandb.finish()
 
 

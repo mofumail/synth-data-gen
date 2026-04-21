@@ -89,18 +89,21 @@ def _load_n_categories() -> int:
 
 N_CATEGORIES = _load_n_categories()
 
-# Derived: unique model name used for checkpoint and config snapshot filenames.
+# Derived unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
 _MODEL_VARIANT = f"svdpq_t{SVDPQ_T}v{SVDPQ_V}" if SVDPQ_ENABLED else "hier"
 MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_{_MODEL_VARIANT}"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/
 
-#Evaluation model: always the model just trained. No separate eval_model key —
-#MODEL_NAME is derived from train_* and svdpq_t/v, so eval automatically points
-#at the matching checkpoint folder.
-EVAL_MODEL_NAME   = MODEL_NAME
-EVAL_MODEL_SUBDIR = MODEL_SUBDIR
+#Evaluation model: the specific timestamped training-run folder to evaluate,
+#e.g. "session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18". Set via
+#the `eval_model` key in config.yaml. Left as None at import time so the
+#various scripts that import config.py (train, notebooks, ...) don't fail
+#when the key is absent; evaluate.py / simulation/orchestrator.py raise a
+#clear error the first time they actually need the path.
+EVAL_MODEL_NAME   = _cfg.get("eval_model")
+EVAL_MODEL_SUBDIR = MODEL_DIR / EVAL_MODEL_NAME if EVAL_MODEL_NAME else None
 
 #GRU4Rec downstream evaluator
 GRU4REC_VOCAB_K     = _cfg["gru4rec_vocab_k"]
