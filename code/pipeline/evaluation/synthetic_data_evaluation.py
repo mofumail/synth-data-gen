@@ -7,11 +7,11 @@ training distribution.
 
 Usage:
     uv run --with polars --with pyarrow python -m evaluation.synthetic_data_evaluation \\
-        output/synthetic/session_transformer_d128_l4_h4_svdpq-seed42-1000000.parquet
+        output/synthetic/session_transformer_d128_l4_h4_svdpq_t32v64-seed42-1000000.parquet
 
     # Compare two synthetic runs side by side
     uv run --with polars --with pyarrow python -m evaluation.synthetic_data_evaluation \\
-        output/synthetic/session_transformer_d128_l4_h4_svdpq-seed42-1000000.parquet \\
+        output/synthetic/session_transformer_d128_l4_h4_svdpq_t32v64-seed42-1000000.parquet \\
         output/synthetic/session_transformer_d128_l4_h4_hier-seed42-1000000.parquet
 """
 

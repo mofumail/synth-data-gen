@@ -25,7 +25,7 @@ mongo_uri: "mongodb://localhost:27017"
 mongo_db:  "synerise"
 
 # Training
-train_epochs:       30
+train_epochs:       100
 train_batch_size:   256
 train_max_length:   50         # max events per session (including EOS)
 train_lr:           0.0003     # AdamW learning rate
@@ -38,7 +38,6 @@ train_num_workers:  4          # dataset is built in main process; workers only 
 # Category head (hierarchical mode)
 category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token, based on notbooks/cat_rare_treshhold.py
 # This one doesn't really matter, SKu coverage numbers are tiny across the board, treshhold 50 only collapses 3.5% of SKUs
-#
 
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
 svdpq_enabled:          true
@@ -47,15 +46,14 @@ svdpq_v:                512         # bins per dim                 ;;; Try: ,204
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
-infer_item_temperature: 1.0        # item head (SVD-PQ Hamming score or flat pool softmax)
+infer_item_temperature: 1.3     # item head (SVD-PQ Hamming score or flat pool softmax)
 svdpq_binning:          quantile   # quantile | uniform , quantile seems better; offers even bin sizes
 svdpq_noise_std:        0.00001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
 svdpq_min_interactions: 2          # below this -> category-centroid cold-start fallback, # based on : notebooks/interactions.py
 # The knee is somewhere inbetween 1 - 2
 # The jump from treshhold 1-2 is 27.3pp, to 29.8pp from 2-3
 
-
-svdpq_event_weights:     # decided based on notebooks/tf-idf-weights.py, inverse frequency
+svdpq_event_weights:     # decided based on notebooks/tf-idf-weights.py, inverse frequency, # calculate weights with lstm rf
   product_buy:        4.0321
   add_to_cart:        2.6985
   remove_from_cart:   3.7798

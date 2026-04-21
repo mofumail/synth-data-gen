@@ -133,8 +133,10 @@ class FidelityEvaluator:
         5M-session reference).
 
         Matched-N semantics:
-            item_coverage = unique_synth / unique_real_matched  (1.0 = parity)
-            gini_delta    = |gini(synth full pop) - gini(real matched full pop)|
+            item_coverage  = unique_synth / unique_real_matched  (1.0 = parity)
+            gini_delta     = |gini(synth full pop) - gini(real matched full pop)|
+            popularity_jsd = JSD(synth pop dist, real matched pop dist)
+                             — union of SKU keys, no top-K truncation
         """
         sku_counts: dict = defaultdict(int)
         for session in sessions:
@@ -159,6 +161,10 @@ class FidelityEvaluator:
 
             synth_total_all = sum(sku_counts.values()) or 1
             synth_gini      = _gini(v / synth_total_all for v in sku_counts.values())
+
+            real_pop  = {sku: c / real_total      for sku, c in real_sku_counts.items()}
+            synth_pop = {sku: c / synth_total_all for sku, c in sku_counts.items()}
+            pop_jsd   = self.compute_jsd(real_pop, synth_pop)
         else:
             coverage  = synth_unique / VOCAB_K if VOCAB_K > 0 else 0.0
             real_unique = VOCAB_K                 # denominator for the unmatched branch
@@ -168,14 +174,11 @@ class FidelityEvaluator:
             synth_total = synth_freq.sum() or 1.0
             synth_gini  = _gini(synth_freq / synth_total)
 
-        gini_delta = abs(synth_gini - real_gini)
+            total     = sum(sku_counts.values()) or 1
+            synth_pop = {sku: sku_counts.get(sku, 0) / total for sku in ref_pop}
+            pop_jsd   = self.compute_jsd(ref_pop, synth_pop)
 
-        # JSD between synth and real popularity distributions (over top-1000 real items).
-        # Shape comparison — size-robust, uses full ref_store even when matched.
-        ref_pop = ref_store.bias.popularity_distribution
-        total     = sum(sku_counts.values()) or 1
-        synth_pop = {sku: sku_counts.get(sku, 0) / total for sku in ref_pop}
-        pop_jsd   = self.compute_jsd(ref_pop, synth_pop)
+        gini_delta = abs(synth_gini - real_gini)
 
         return BiasResult(
             item_coverage            = coverage,
