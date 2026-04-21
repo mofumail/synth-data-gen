@@ -11,6 +11,7 @@ Usage:
     python main.py --n-sessions 1000 --fidelity-only   # forwarded to evaluate.py
 """
 import argparse
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -63,12 +64,18 @@ def latest_trained_model() -> str:
 
 
 def update_eval_model(folder_name: str) -> None:
-    cfg = yaml.safe_load(CONFIG_YAML.read_text())
+    """Line-level edit so comments and formatting in config.yaml survive."""
+    text = CONFIG_YAML.read_text()
+    cfg = yaml.safe_load(text)
     if cfg.get("eval_model") == folder_name:
         return
-    cfg["eval_model"] = folder_name
-    with open(CONFIG_YAML, "w") as f:
-        yaml.dump(cfg, f, default_flow_style=False, sort_keys=False)
+    pattern = re.compile(r"^(eval_model\s*:).*$", re.MULTILINE)
+    new_text, n = pattern.subn(f"\\1 {folder_name}", text, count=1)
+    if n == 0:
+        if not new_text.endswith("\n"):
+            new_text += "\n"
+        new_text += f"eval_model: {folder_name}\n"
+    CONFIG_YAML.write_text(new_text)
     print(f"[main] set eval_model = {folder_name} in config.yaml")
 
 
