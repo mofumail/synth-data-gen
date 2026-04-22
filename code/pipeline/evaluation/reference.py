@@ -57,6 +57,17 @@ class DistributionProfile:
     cart_abandonment_rate: float = 0.0      # fraction with add_to_cart but no product_buy
 
 
+def filter_sessions_to_vocab(sessions: List[List[dict]], vocab_skus: set) -> None:
+    """Replace out-of-vocab SKUs with None in-place. Preserves session length /
+    timing / action distribution so non-item metrics stay comparable, but bounds
+    coverage / popularity / item-bigram metrics to what the model can emit."""
+    for session in sessions:
+        for ev in session:
+            sku = ev.get("sku")
+            if sku is not None and sku not in vocab_skus:
+                ev["sku"] = None
+
+
 @dataclass
 class BiasProfile:
     item_coverage: float

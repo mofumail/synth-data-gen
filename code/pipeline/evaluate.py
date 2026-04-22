@@ -39,18 +39,19 @@ from datetime import datetime
 import torch
 from collections import defaultdict
 
-from config import MODEL_DIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR, TRAIN_MAX_LENGTH
+from config import MODEL_DIR, EVAL_MODEL_SUBDIR, EVAL_MODEL_NAME, OUTPUT_DIR, TRAIN_MAX_LENGTH, VOCAB_K
 from evaluation.fidelity import FidelityEvaluator
 from evaluation.orchestrator import EvaluationOrchestrator
-from evaluation.reference import RealDataLoader, ReferenceProfiler, ReferenceStore
+from evaluation.reference import RealDataLoader, ReferenceProfiler, ReferenceStore, filter_sessions_to_vocab
 from evaluation.report import ReportGenerator
 from evaluation.markov import MarkovSessionGenerator
+from ingestion.dataset import get_sku2idx
 from simulation.generator.session_generator import SessionGenerator
 from simulation.validity import ValidityLayer
 
 
-REF_STORE_PATH     = OUTPUT_DIR / "reference_store.joblib"
-VAL_REF_STORE_PATH = OUTPUT_DIR / "val_reference_store.joblib"
+REF_STORE_PATH     = OUTPUT_DIR / f"reference_store_v{VOCAB_K}.joblib"
+VAL_REF_STORE_PATH = OUTPUT_DIR / f"val_reference_store_v{VOCAB_K}.joblib"
 
 
 def _require_eval_model() -> None:
@@ -145,6 +146,15 @@ def evaluate(args):
         include_test       = args.final,
     )
 
+    # Filter to current vocab so coverage / popularity are bounded by what the
+    # model can actually emit (OOV SKUs -> None; session structure preserved).
+    vocab_skus = set(get_sku2idx().keys())
+    print(f"  Filtering real splits to {len(vocab_skus):,} in-vocab SKUs (VOCAB_K={VOCAB_K}) ...")
+    filter_sessions_to_vocab(real_data.train_split, vocab_skus)
+    filter_sessions_to_vocab(real_data.val_split,   vocab_skus)
+    if real_data.test_split:
+        filter_sessions_to_vocab(real_data.test_split, vocab_skus)
+
     # Reference stores
     ref_store, val_ref_store = build_ref_store(real_data)
 
@@ -235,6 +245,11 @@ def run_fidelity_only(args):
         max_train_sessions=args.max_train,
         max_val_sessions=args.max_val,
     )
+
+    vocab_skus = set(get_sku2idx().keys())
+    print(f"  Filtering real splits to {len(vocab_skus):,} in-vocab SKUs (VOCAB_K={VOCAB_K}) ...")
+    filter_sessions_to_vocab(real_data.train_split, vocab_skus)
+    filter_sessions_to_vocab(real_data.val_split,   vocab_skus)
 
     _print_session_length_stats(real_data.train_split, "train", TRAIN_MAX_LENGTH)
     _print_session_length_stats(real_data.val_split,   "val",   TRAIN_MAX_LENGTH)

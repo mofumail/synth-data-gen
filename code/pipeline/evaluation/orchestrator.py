@@ -16,13 +16,15 @@ import pandas as pd
 import torch
 from scipy.stats import pearsonr
 
-from config import OUTPUT_DIR
+from config import OUTPUT_DIR, VOCAB_K
 from evaluation.data_classes import (
     AggregatedResult, BiasResult, CorrelationResult,
     FidelityResult, SeedResult, UtilityResult, ValidityResult,
 )
 from evaluation.fidelity import FidelityEvaluator
+from evaluation.reference import filter_sessions_to_vocab
 from evaluation.validity_checker import ValidityChecker
+from ingestion.dataset import get_sku2idx
 from evaluation.downstream import DownstreamEvaluator
 from evaluation.reference import ReferenceStore
 
@@ -144,6 +146,14 @@ class EvaluationOrchestrator:
 
         print(f"  Generating {n_sessions} Markov sessions ...")
         synth_M_all = baseline_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
+
+        # Markov samples raw SKUs from CLEAN_PARQUET (full 1.5M catalog), so
+        # without this filter its coverage / popularity would be unfairly
+        # inflated vs the transformer (which is bounded to VOCAB_K by
+        # construction). Mirror what the transformer effectively emits.
+        vocab_skus = set(get_sku2idx().keys())
+        filter_sessions_to_vocab(synth_M_all, vocab_skus)
+        print(f"  Filtered Markov synth to {len(vocab_skus):,} in-vocab SKUs (VOCAB_K={VOCAB_K})")
 
         # Filter empty-session placeholders before fidelity / TSTR / save.
         # ValidityLayer leaves [] placeholders when a session fails constraints;
