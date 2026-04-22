@@ -11,11 +11,17 @@ TEST_PARQUET       = OUTPUT_DIR / "events_test.parquet"
 MODEL_DIR          = OUTPUT_DIR / "models"
 SYNTH_DIR          = OUTPUT_DIR / "synthetic"
 CAT2IDX_PATH       = OUTPUT_DIR / "cat2idx.joblib"
-CAT_SKU_POOLS_PATH = OUTPUT_DIR / "cat_sku_pools.joblib"
-SVDPQ_PATH         = OUTPUT_DIR / "sku_tokens.joblib"
 
 # Load config.yaml
 _cfg = yaml.safe_load((PIPELINE_DIR / "config.yaml").read_text())
+
+# Vocab-keyed artifact paths: changing vocab_k routes to a different file so
+# stale 630k caches don't get reused under a 200k config.
+def _vocab_suffixed(name: str, ext: str) -> Path:
+    return OUTPUT_DIR / f"{name}_v{_cfg['vocab_k']}.{ext}"
+
+CAT_SKU_POOLS_PATH = _vocab_suffixed("cat_sku_pools", "joblib")
+SVDPQ_PATH         = _vocab_suffixed("sku_tokens", "joblib")
 
 #Dataset bounds
 DS_START = _cfg["ds_start"]

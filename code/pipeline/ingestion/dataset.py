@@ -40,7 +40,7 @@ _CACHE_FIELDS = ("events", "items", "deltas", "categories", "offsets", "client_i
 
 
 def _cache_path(split: str, max_length: int, min_length: int, max_sessions) -> str:
-    tag = f"{split}_ml{max_length}_min{min_length}_ms{max_sessions or 'all'}"
+    tag = f"{split}_ml{max_length}_min{min_length}_ms{max_sessions or 'all'}_v{VOCAB_K}"
     return str(OUTPUT_DIR / f"session_cache_{tag}")
 
 
@@ -56,9 +56,9 @@ def _cache_valid(cache_dir: str, parquet_path: str) -> bool:
             return False
     return True
 
-SKU2IDX_PATH        = OUTPUT_DIR / "sku2idx.joblib"
-VOCAB_STATS_PATH    = OUTPUT_DIR / "vocab_stats.joblib"
-SKU_PROPERTIES_PATH = OUTPUT_DIR / "sku_properties.joblib"
+SKU2IDX_PATH        = OUTPUT_DIR / f"sku2idx_v{VOCAB_K}.joblib"
+VOCAB_STATS_PATH    = OUTPUT_DIR / f"vocab_stats_v{VOCAB_K}.joblib"
+SKU_PROPERTIES_PATH = OUTPUT_DIR / f"sku_properties_v{VOCAB_K}.joblib"
 NAME_LEN            = 16
 NAME_VOCAB          = 256
 PRICE_BINS          = 100
@@ -110,8 +110,20 @@ def get_vocab_stats(df_train_skus: pd.Series = None):
 
 
 def get_sku2idx(df_train_skus: pd.Series = None) -> dict:
-    """Load cached sku2idx or build and cache it."""
-    return get_vocab_stats(df_train_skus)[0]
+    """Load cached sku2idx, or rebuild from CLEAN_PARQUET if the cache is missing."""
+    if VOCAB_STATS_PATH.exists() or df_train_skus is not None:
+        return get_vocab_stats(df_train_skus)[0]
+
+    print(f"  vocab_stats not found at {VOCAB_STATS_PATH}. "
+          f"Rebuilding from {CLEAN_PARQUET} (one-time, ~1-2 min)...")
+    df = pl.read_parquet(str(CLEAN_PARQUET), columns=["timestamp", "session_id", "sku"])
+    session_starts = df.group_by("session_id").agg(
+        pl.col("timestamp").min().alias("session_start")
+    )
+    df = df.join(session_starts, on="session_id").filter(
+        pl.col("session_start") < pd.Timestamp(TRAIN_CUTOFF)
+    )
+    return get_vocab_stats(df.select("sku").to_series().to_pandas())[0]
 
 
 def ensure_vocab_stats() -> np.ndarray:

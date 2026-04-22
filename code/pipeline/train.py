@@ -176,8 +176,9 @@ def train():
     #test
     else:
         item_head.register_sku_cat_map(cat_sku_pools_tensors, VOCAB_K)
-    model = torch.compile(model)
-    # model = torch.compile(model, dymamic=True) #
+    # torch.compile disabled: hits an inductor tiling_utils assertion on this
+    # model graph (PyTorch bug, not ours). bf16 alone is fast enough here.
+    # model = torch.compile(model, dynamic=True)
 
     n_params = sum(p.numel() for p in model.parameters())
     print(f"  Model parameters: {n_params:,}")
