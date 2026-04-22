@@ -97,6 +97,7 @@ def train():
     wandb.define_metric("val/*",   step_metric="epoch")
 
     # Dataset
+    _t_train_load = time.perf_counter()
     print(f"\nLoading dataset (split=train, max_sessions={TRAIN_MAX_SESSIONS}) ...")
     gen = InteractionGenerator(
         split="train",
@@ -106,7 +107,9 @@ def train():
         max_sessions=TRAIN_MAX_SESSIONS,
     )
     print(f"{len(gen.dataset):,} training sessions | {len(gen):,} batches/epoch")
+    print(f"  >> train load: {time.perf_counter() - _t_train_load:.2f}s")
 
+    _t_val_load = time.perf_counter()
     print(f"\nLoading validation dataset ...")
     val_gen = InteractionGenerator(
         split="val",
@@ -116,6 +119,8 @@ def train():
         max_sessions=None,        # always use full val set
     )
     print(f"{len(val_gen.dataset):,} val sessions | {len(val_gen):,} batches")
+    print(f"  >> val load:   {time.perf_counter() - _t_val_load:.2f}s")
+    print(f"  >> total dataset load: {time.perf_counter() - _t_train_load:.2f}s")
 
     # Category vocab: load per-category SKU pools as GPU tensors. Used to build
     # the masked softmax so the item-head loss normalizes only over SKUs in the

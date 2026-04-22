@@ -36,16 +36,25 @@ from simulation.generator.session_transformer import (
 )
 
 
+_CACHE_FIELDS = ("events", "items", "deltas", "categories", "offsets", "client_ids")
+
+
 def _cache_path(split: str, max_length: int, min_length: int, max_sessions) -> str:
     tag = f"{split}_ml{max_length}_min{min_length}_ms{max_sessions or 'all'}"
-    return str(OUTPUT_DIR / f"session_cache_{tag}.joblib")
+    return str(OUTPUT_DIR / f"session_cache_{tag}")
 
 
-def _cache_valid(cache_file: str, parquet_path: str) -> bool:
-    """Cache is valid if it exists and is newer than the source parquet."""
-    if not os.path.exists(cache_file):
+def _cache_valid(cache_dir: str, parquet_path: str) -> bool:
+    """Cache is valid if the directory exists, all field files are present, and
+    they're newer than the source parquet."""
+    if not os.path.isdir(cache_dir):
         return False
-    return os.path.getmtime(cache_file) >= os.path.getmtime(parquet_path)
+    parquet_mtime = os.path.getmtime(parquet_path)
+    for field in _CACHE_FIELDS:
+        f = os.path.join(cache_dir, f"{field}.npy")
+        if not os.path.exists(f) or os.path.getmtime(f) < parquet_mtime:
+            return False
+    return True
 
 SKU2IDX_PATH        = OUTPUT_DIR / "sku2idx.joblib"
 VOCAB_STATS_PATH    = OUTPUT_DIR / "vocab_stats.joblib"
@@ -288,17 +297,23 @@ class SessionDataset(Dataset):
 
         path = str(parquet_path or CLEAN_PARQUET)
 
-        # Fast path: load from disk cache if parquet hasn't changed
-        cache_file = _cache_path(split, max_length, min_length, max_sessions)
-        if _cache_valid(cache_file, path):
-            print(f"  Loading dataset from cache: {cache_file}")
-            cached = joblib.load(cache_file)
-            self._sessions               = cached["sessions"]
-            self._user_session_indices   = cached["user_session_indices"]
-            self._session_pos_in_user    = cached["session_pos_in_user"]
-            print(f"  {len(self._sessions):,} sessions loaded from cache")
-            # Load cat2idx for __getitem__ (may not exist for pre-hierarchical caches)
+        # Fast path: mmap flat columnar cache if parquet hasn't changed.
+        # Each field is a separate .npy so np.load(mmap_mode='r') works (mmap doesn't
+        # support .npz). Tensor-bearing fields stay as mmaps so OS pages them in lazily
+        # and DataLoader workers share pages instead of forking a copy.
+        cache_dir = _cache_path(split, max_length, min_length, max_sessions)
+        if _cache_valid(cache_dir, path):
+            print(f"  Loading dataset from cache: {cache_dir}")
+            self._events_flat     = np.load(os.path.join(cache_dir, "events.npy"),     mmap_mode="r")
+            self._items_flat      = np.load(os.path.join(cache_dir, "items.npy"),      mmap_mode="r")
+            self._deltas_flat     = np.load(os.path.join(cache_dir, "deltas.npy"),     mmap_mode="r")
+            self._categories_flat = np.load(os.path.join(cache_dir, "categories.npy"), mmap_mode="r")
+            # offsets + client_ids are small (8 B/session) so load eagerly.
+            self._offsets    = np.load(os.path.join(cache_dir, "offsets.npy"))
+            self._client_ids = np.load(os.path.join(cache_dir, "client_ids.npy"))
+            self._build_user_indices()
             self._cat2idx: dict = joblib.load(CAT2IDX_PATH) if CAT2IDX_PATH.exists() else {}
+            print(f"  {len(self._offsets) - 1:,} sessions loaded from cache")
             return
 
         # Detect which columns are present (category/price added by preprocess.py)
@@ -419,81 +434,94 @@ class SessionDataset(Dataset):
         if max_sessions is not None:
             sessions_df = sessions_df.head(max_sessions)
 
-        # Single Python pass: build numpy records from polars lists.
+        # Single Python pass: collect per-session arrays then concat into flat columns.
         # EOS is appended as the final token so the model learns session termination
         # from real boundaries (PvA §5.3). One slot is reserved from max_length.
-        # Stored as numpy arrays (not torch tensors) so joblib cache is fast to save/load;
-        # conversion to tensors happens lazily in __getitem__.
-        self._sessions: List[Dict] = []
+        events_chunks:     List[np.ndarray] = []
+        items_chunks:      List[np.ndarray] = []
+        deltas_chunks:     List[np.ndarray] = []
+        categories_chunks: List[np.ndarray] = []
+        lengths_list:      List[int]        = []
+        client_ids_list:   List[int]        = []
         for row in sessions_df.iter_rows(named=True):
-            n_raw      = min(int(row["n"]), max_length - 1)   # reserve one slot for EOS
-            actions    = row["actions"][-n_raw:]    + [EOS_IDX]
-            items      = row["items"][-n_raw:]      + [0]
-            deltas     = row["deltas"][-n_raw:]     + [0]
-            categories = row["categories"][-n_raw:] + [0]
-            n          = n_raw + 1
+            n_raw = min(int(row["n"]), max_length - 1)   # reserve one slot for EOS
+            events_chunks.append(    np.asarray(row["actions"][-n_raw:]    + [EOS_IDX], dtype=np.int64))
+            items_chunks.append(     np.asarray(row["items"][-n_raw:]      + [0],       dtype=np.int64))
+            deltas_chunks.append(    np.asarray(row["deltas"][-n_raw:]     + [0],       dtype=np.int64))
+            categories_chunks.append(np.asarray(row["categories"][-n_raw:] + [0],       dtype=np.int64))
+            lengths_list.append(n_raw + 1)
+            client_ids_list.append(int(row["client_id"]))
 
-            self._sessions.append({
-                "client_id":  int(row["client_id"]),
-                "events":     np.array(actions,    dtype=np.int64),
-                "items":      np.array(items,      dtype=np.int64),
-                "deltas":     np.array(deltas,     dtype=np.int64),
-                "categories": np.array(categories, dtype=np.int64),
-                "length":     n,
-            })
+        self._events_flat     = np.concatenate(events_chunks)     if events_chunks     else np.empty(0, dtype=np.int64)
+        self._items_flat      = np.concatenate(items_chunks)      if items_chunks      else np.empty(0, dtype=np.int64)
+        self._deltas_flat     = np.concatenate(deltas_chunks)     if deltas_chunks     else np.empty(0, dtype=np.int64)
+        self._categories_flat = np.concatenate(categories_chunks) if categories_chunks else np.empty(0, dtype=np.int64)
+        # offsets[i] = start of session i in flat arrays; offsets[-1] = total length
+        self._offsets    = np.concatenate(([0], np.cumsum(lengths_list))).astype(np.int64)
+        self._client_ids = np.asarray(client_ids_list, dtype=np.int64)
 
-        # Build per-user ordered index (session_id is time-based so order is preserved)
+        self._build_user_indices()
+
+        # Save flat columnar cache for fast mmap reloads
+        print(f"  Saving dataset cache -> {cache_dir}")
+        os.makedirs(cache_dir, exist_ok=True)
+        np.save(os.path.join(cache_dir, "events.npy"),     self._events_flat)
+        np.save(os.path.join(cache_dir, "items.npy"),      self._items_flat)
+        np.save(os.path.join(cache_dir, "deltas.npy"),     self._deltas_flat)
+        np.save(os.path.join(cache_dir, "categories.npy"), self._categories_flat)
+        np.save(os.path.join(cache_dir, "offsets.npy"),    self._offsets)
+        np.save(os.path.join(cache_dir, "client_ids.npy"), self._client_ids)
+
+    def _build_user_indices(self) -> None:
+        """Rebuild per-user ordered index + per-session position from client_ids.
+        Cheap O(N) walk; runs once per __init__ in both cache-hit and build paths."""
         user_idx: dict = defaultdict(list)
-        for i, s in enumerate(self._sessions):
-            user_idx[s["client_id"]].append(i)
+        for i, cid in enumerate(self._client_ids.tolist()):
+            user_idx[cid].append(i)
         self._user_session_indices: Dict[int, List[int]] = dict(user_idx)
-
-        # Precompute each session's position within its user's session list
         self._session_pos_in_user: Dict[int, int] = {}
         for user_sessions in self._user_session_indices.values():
             for pos, sess_idx in enumerate(user_sessions):
                 self._session_pos_in_user[sess_idx] = pos
 
-        # Save to cache for fast reloads
-        print(f"  Saving dataset cache -> {cache_file}")
-        joblib.dump({
-            "sessions":             self._sessions,
-            "user_session_indices": self._user_session_indices,
-            "session_pos_in_user":  self._session_pos_in_user,
-        }, cache_file)
+    def _slice(self, arr: np.ndarray, idx: int) -> np.ndarray:
+        s = int(self._offsets[idx])
+        e = int(self._offsets[idx + 1])
+        return arr[s:e]
 
     def __len__(self) -> int:
-        return len(self._sessions)
+        return len(self._offsets) - 1
 
     def __getitem__(self, idx: int) -> Dict:
-        sess       = self._sessions[idx]
-        cid        = sess["client_id"]
-        pos        = self._session_pos_in_user[idx]
+        s   = int(self._offsets[idx])
+        e   = int(self._offsets[idx + 1])
+        cid = int(self._client_ids[idx])
+        pos = self._session_pos_in_user[idx]
         prior_idxs = self._user_session_indices[cid][:pos]
 
         if prior_idxs:
-            prior_e = np.concatenate([self._sessions[i]["events"] for i in prior_idxs])
-            prior_i = np.concatenate([self._sessions[i]["items"]  for i in prior_idxs])
-            prior_d = np.concatenate([self._sessions[i]["deltas"] for i in prior_idxs])
+            prior_e = np.concatenate([self._slice(self._events_flat, i) for i in prior_idxs])
+            prior_i = np.concatenate([self._slice(self._items_flat,  i) for i in prior_idxs])
+            prior_d = np.concatenate([self._slice(self._deltas_flat, i) for i in prior_idxs])
             H = min(len(prior_e), self._history_window)
             history = {
-                "events": torch.from_numpy(prior_e[-H:]),
-                "items":  torch.from_numpy(prior_i[-H:]),
-                "deltas": torch.from_numpy(prior_d[-H:]),
+                "events": torch.from_numpy(np.array(prior_e[-H:])),
+                "items":  torch.from_numpy(np.array(prior_i[-H:])),
+                "deltas": torch.from_numpy(np.array(prior_d[-H:])),
                 "length": H,
             }
         else:
             history = None
 
+        # np.array copies the mmap slice into a writable, owned array so
+        # torch.from_numpy doesn't warn about the read-only mmap view.
         return {
-            "client_id":  sess["client_id"],
-            "events":     torch.from_numpy(sess["events"]),
-            "items":      torch.from_numpy(sess["items"]),
-            "deltas":     torch.from_numpy(sess["deltas"]),
-            "categories": torch.from_numpy(
-                sess.get("categories", np.zeros(sess["length"], dtype=np.int64))
-            ),
-            "length":     sess["length"],
+            "client_id":  cid,
+            "events":     torch.from_numpy(np.array(self._events_flat    [s:e])),
+            "items":      torch.from_numpy(np.array(self._items_flat     [s:e])),
+            "deltas":     torch.from_numpy(np.array(self._deltas_flat    [s:e])),
+            "categories": torch.from_numpy(np.array(self._categories_flat[s:e])),
+            "length":     e - s,
             "history":    history,
         }
 
