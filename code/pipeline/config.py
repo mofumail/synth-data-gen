@@ -79,10 +79,20 @@ SVDPQ_BINNING          = _cfg["svdpq_binning"]
 SVDPQ_NOISE_STD        = _cfg["svdpq_noise_std"]
 SVDPQ_MIN_INTERACTIONS = _cfg["svdpq_min_interactions"]
 SVDPQ_EVENT_WEIGHTS    = _cfg["svdpq_event_weights"]
+SVDPQ_LABEL_SMOOTHING  = float(_cfg.get("svdpq_label_smoothing", 0.0))
+if not 0.0 <= SVDPQ_LABEL_SMOOTHING < 1.0:
+    raise ValueError(
+        f"svdpq_label_smoothing must be in [0, 1), got {SVDPQ_LABEL_SMOOTHING}"
+    )
 
 #Inference sampling
 INFER_TEMPERATURE      = _cfg["infer_temperature"]
 INFER_ITEM_TEMPERATURE = _cfg["infer_item_temperature"]
+SVDPQ_INFER_SCORER     = _cfg.get("svdpq_infer_scorer", "hamming")
+if SVDPQ_INFER_SCORER not in ("hamming", "log_prob"):
+    raise ValueError(
+        f"svdpq_infer_scorer must be 'hamming' or 'log_prob', got {SVDPQ_INFER_SCORER!r}"
+    )
 
 def _load_n_categories() -> int:
     """Load n_categories from cat2idx.joblib if available (built by preprocess.py)."""

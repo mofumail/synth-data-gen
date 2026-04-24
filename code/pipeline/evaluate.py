@@ -260,14 +260,20 @@ def run_fidelity_only(args):
     primary_gen = build_transformer_generator(ref_store)
 
     print(f"\nGenerating {args.n_sessions} sessions (seed={args.base_seed}) ...")
-    synth = primary_gen.generate(
+    synth_all = primary_gen.generate(
         n_sessions=args.n_sessions, seed=args.base_seed, apply_constraints=True
     )
-    print(f"  {len(synth)} sessions generated")
+    # Drop empty-session placeholders left by ValidityLayer — otherwise they
+    # inflate len(synth) used for matched-N bias sampling, add length-0 entries
+    # to ks_session_length, and hit the denominator of conv/abandonment rates
+    # without contributing to the numerator.
+    synth = [s for s in synth_all if s]
+    print(f"  {len(synth):,}/{args.n_sessions:,} non-empty sessions "
+          f"({100*len(synth)/max(args.n_sessions,1):.1f}%)")
 
     fid_ev = FidelityEvaluator()
-    ft = fid_ev.evaluate(real_data, synth, ref_store)
-    fv = fid_ev.evaluate(real_data, synth, val_ref_store)
+    ft = fid_ev.evaluate(real_data, synth, ref_store,     matched_source=real_data.train_split)
+    fv = fid_ev.evaluate(real_data, synth, val_ref_store, matched_source=real_data.val_split)
 
     def _print(label, f):
         print(f"\n Fidelity {label} ")

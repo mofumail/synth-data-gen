@@ -59,6 +59,11 @@ def _cache_valid(cache_dir: str, parquet_path: str) -> bool:
 SKU2IDX_PATH        = OUTPUT_DIR / f"sku2idx_v{VOCAB_K}.joblib"
 VOCAB_STATS_PATH    = OUTPUT_DIR / f"vocab_stats_v{VOCAB_K}.joblib"
 SKU_PROPERTIES_PATH = OUTPUT_DIR / f"sku_properties_v{VOCAB_K}.joblib"
+# Fixed by the Synerise 2025 product_properties.parquet schema — these are
+# NOT tunable hyperparameters. The upstream data comes with prices already
+# bucketed into 100 bins and names pre-quantized to 16 tokens drawn from a
+# 256-symbol codebook. Changing any of these would desync this loader from
+# the source parquet's column shape, not re-tokenize the data.
 NAME_LEN            = 16
 NAME_VOCAB          = 256
 PRICE_BINS          = 100

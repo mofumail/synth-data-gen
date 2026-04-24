@@ -223,10 +223,21 @@ class SVDPQItemHead(nn.Module):
     sku_tokens : [V, t] long buffer, populated via register_sku_tokens().
     """
 
-    def __init__(self, d_model: int, t: int, v: int, n_categories: int = 0):
+    def __init__(
+        self,
+        d_model: int,
+        t: int,
+        v: int,
+        n_categories: int = 0,
+        label_smoothing: float = 0.0,
+    ):
         super().__init__()
         self.t = t
         self.v = v
+        # Label smoothing bounds per-dim peak probability at (1 - ε + ε/v),
+        # which caps the t-factor joint and stops log_prob inference from
+        # collapsing to winner-take-all. Training-time only; not a parameter.
+        self.label_smoothing = float(label_smoothing)
         # One matmul producing all t*v logits; reshape to [M, t, v].
         self.fc            = nn.Linear(d_model, t * v)
         self.action_cond   = nn.Embedding(N_ACTIONS, d_model)
@@ -266,6 +277,7 @@ class SVDPQItemHead(nn.Module):
         return F.cross_entropy(
             logits.reshape(-1, self.v),
             targets.reshape(-1),
+            label_smoothing=self.label_smoothing,
         )
 
     def predict_tokens(
@@ -366,6 +378,7 @@ class SessionTransformer(nn.Module):
         sku_tokens_table: Optional[np.ndarray] = None, # [V, svdpq_t] int, 0=PAD row
         svdpq_t: int = 0,                              # tokens per item (0 = disabled)
         svdpq_v: int = 0,                              # bins per dim
+        svdpq_label_smoothing: float = 0.0,            # per-dim CE smoothing ε (train-time only)
     ):
         super().__init__()
         self.d_model      = d_model
@@ -435,6 +448,7 @@ class SessionTransformer(nn.Module):
             self.item_head = SVDPQItemHead(
                 d_model, t=svdpq_t, v=svdpq_v,
                 n_categories=n_categories,
+                label_smoothing=svdpq_label_smoothing,
             )
             if sku_tokens_table is not None:
                 self.item_head.register_sku_tokens(torch.as_tensor(sku_tokens_table, dtype=torch.long))
@@ -556,6 +570,7 @@ class SessionTransformer(nn.Module):
         max_steps: int = 50,
         temperature: float = 1.0,
         item_temperature: float = 1.0,
+        svdpq_scorer: str = "hamming",
     ) -> List[List[dict]]:
         """
         Batched autoregressive inference.
@@ -571,10 +586,16 @@ class SessionTransformer(nn.Module):
         max_steps        : max events per session before forced stop
         temperature      : sampling temperature for action/category/temporal heads
         item_temperature : sampling temperature for the item head
+        svdpq_scorer     : 'hamming' (sample t tokens, rank pool SKUs by match count)
+                           or 'log_prob' (rank pool SKUs by factored log-likelihood).
+                           Ignored when item_head is not SVDPQItemHead.
 
         Returns:
         List[List[dict]] - one event-dict list per input
         """
+        assert svdpq_scorer in ("hamming", "log_prob"), (
+            f"svdpq_scorer must be 'hamming' or 'log_prob', got {svdpq_scorer!r}"
+        )
 
         self.eval()
         device  = next(self.parameters()).device
@@ -662,22 +683,44 @@ class SessionTransformer(nn.Module):
                     item_result = torch.zeros(is_item.sum(), dtype=torch.long, device=device)
 
                     if isinstance(self.item_head, SVDPQItemHead):
-                        # SVD-PQ inference: sample t tokens (honors item_temperature),
-                        # then pick the in-category SKU with highest token-match count.
-                        pred_tokens = self.item_head.sample_tokens(
-                            h_item, a_item, c_idxs, temperature=item_temperature,
-                        )  # [M, t]
-                        for m, ci in enumerate(c_list):
-                            pool = pools[ci] if pools is not None and ci < len(pools) else None
-                            assert pool is not None and len(pool) > 0, (
-                                f"empty_cat_mask failed: category {ci} has no SKU pool"
-                            )
-                            pool_tokens = self.item_head.sku_tokens[pool]    # [P, t]
-                            match = (pool_tokens == pred_tokens[m]).sum(dim=-1)  # [P]
-                            k_fb = len(pool)
-                            top_v, top_idx = match.topk(k_fb)
-                            probs = F.softmax(top_v.float() / max(item_temperature, 1e-6), dim=-1)
-                            item_result[m] = pool[top_idx[int(torch.multinomial(probs, 1).item())]]
+                        # SVD-PQ inference. Two scorers share the per-dim logits
+                        # but differ in how they map them to a single pool SKU:
+                        #   hamming  : sample tokens, rank pool by match count (coarse — integer counts)
+                        #   log_prob : rank pool by sum of per-dim log-probs of its tokens (factored likelihood)
+                        cond  = self.item_head._cond(h_item, a_item, c_idxs)
+                        t_, v_ = self.item_head.t, self.item_head.v
+                        logits = self.item_head.fc(cond).view(-1, t_, v_)   # [M, t, v]
+                        inv_T  = 1.0 / max(item_temperature, 1e-6)
+
+                        if svdpq_scorer == "hamming":
+                            probs_tok   = F.softmax(logits.float() * inv_T, dim=-1)
+                            M_          = probs_tok.size(0)
+                            pred_tokens = torch.multinomial(
+                                probs_tok.reshape(M_ * t_, v_), 1
+                            ).view(M_, t_)                                  # [M, t]
+                            for m, ci in enumerate(c_list):
+                                pool = pools[ci] if pools is not None and ci < len(pools) else None
+                                assert pool is not None and len(pool) > 0, (
+                                    f"empty_cat_mask failed: category {ci} has no SKU pool"
+                                )
+                                pool_tokens = self.item_head.sku_tokens[pool]           # [P, t]
+                                match = (pool_tokens == pred_tokens[m]).sum(dim=-1)     # [P]
+                                k_fb = len(pool)
+                                top_v, top_idx = match.topk(k_fb)
+                                pick_probs = F.softmax(top_v.float() * inv_T, dim=-1)
+                                item_result[m] = pool[top_idx[int(torch.multinomial(pick_probs, 1).item())]]
+                        else:  # log_prob
+                            log_probs = F.log_softmax(logits.float() * inv_T, dim=-1)   # [M, t, v]
+                            for m, ci in enumerate(c_list):
+                                pool = pools[ci] if pools is not None and ci < len(pools) else None
+                                assert pool is not None and len(pool) > 0, (
+                                    f"empty_cat_mask failed: category {ci} has no SKU pool"
+                                )
+                                pool_tokens = self.item_head.sku_tokens[pool]           # [P, t]
+                                # scores[p] = sum_k log p(pool_tokens[p, k] | ...)
+                                scores = log_probs[m].gather(1, pool_tokens.T).sum(dim=0)  # [P]
+                                pick_probs = F.softmax(scores, dim=-1)
+                                item_result[m] = pool[int(torch.multinomial(pick_probs, 1).item())]
                     else:
                         for m, ci in enumerate(c_list):
                             pool = pools[ci] if pools is not None and ci < len(pools) else None

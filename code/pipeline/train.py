@@ -35,7 +35,7 @@ from config import (
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
     TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
     N_CATEGORIES, CAT2IDX_PATH,
-    SVDPQ_ENABLED, SVDPQ_T, SVDPQ_V,
+    SVDPQ_ENABLED, SVDPQ_T, SVDPQ_V, SVDPQ_LABEL_SMOOTHING,
 )
 from ingestion.dataset import (
     InteractionGenerator, get_cat_vocab, get_sku2idx, get_sku_properties,
@@ -164,6 +164,7 @@ def train():
         sku_tokens_table=sku_tokens,
         svdpq_t=SVDPQ_T if SVDPQ_ENABLED else 0,
         svdpq_v=SVDPQ_V if SVDPQ_ENABLED else 0,
+        svdpq_label_smoothing=SVDPQ_LABEL_SMOOTHING if SVDPQ_ENABLED else 0.0,
     ).to(device)
     # Capture the uncompiled item_head BEFORE torch.compile so its .loss /
     # .hierarchical_loss reaches the real module rather than going through the

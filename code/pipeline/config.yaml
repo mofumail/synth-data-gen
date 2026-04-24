@@ -11,7 +11,7 @@ session_timeout_min: 30        # inactivity gap (minutes) that starts a new sess
 history_window:      16        # max past events used as cross-session context (covers 93.9% of users)
 
 # Vocabulary
-vocab_k: 630052                # top-K SKUs covering ~90% of training item events
+vocab_k: 200000               # top-K SKUs covering ~90% of training item events
 
 # Temporal head
 n_temporal_bins: 64            # log-spaced bins between temporal_min_s and session_timeout
@@ -25,7 +25,7 @@ mongo_uri: "mongodb://localhost:27017"
 mongo_db:  "synerise"
 
 # Training
-train_epochs:       100
+train_epochs:       50
 train_batch_size:   256
 train_max_length:   50         # max events per session (including EOS)
 train_lr:           0.0003     # AdamW learning rate
@@ -43,15 +43,20 @@ category_rare_threshold: 5   # categories with <= this many SKUs are collapsed t
 svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
+svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token peakedness so the t-factor joint doesn't collapse to winner-take-all. 0.0 = off.
 
 # Evaluation - folder name of the trained model to evaluate (under output/models/).
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
-eval_model: session_transformer_d128_l4_h4_svdpq_t4v512
+eval_model: session_transformer_d128_l4_h4_svdpq_t8v256_240426-10-16-52
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
-infer_item_temperature: 1.3     # item head (SVD-PQ Hamming score or flat pool softmax)
+infer_item_temperature: 1.0     # item head (SVD-PQ Hamming score or flat pool softmax)
+# SVD-PQ inference scorer: how to pick the final in-pool SKU from the t per-dim softmaxes.
+#   hamming  : sample t tokens, rank pool SKUs by count of matching tokens (legacy)
+#   log_prob : score each pool SKU by sum of log-probs of its t tokens under the head (true factored likelihood)
+svdpq_infer_scorer:     log_prob   # hamming | log_prob
 svdpq_binning:          quantile   # quantile | uniform , quantile seems better; offers even bin sizes
 svdpq_noise_std:        0.00001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
 svdpq_min_interactions: 2          # below this -> category-centroid cold-start fallback, # based on : notebooks/interactions.py

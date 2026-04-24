@@ -23,7 +23,10 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from config import DS_START, HISTORY_WINDOW, VOCAB_K, INFER_TEMPERATURE, INFER_ITEM_TEMPERATURE
+from config import (
+    DS_START, HISTORY_WINDOW, VOCAB_K,
+    INFER_TEMPERATURE, INFER_ITEM_TEMPERATURE, SVDPQ_INFER_SCORER,
+)
 from simulation.validity import ValidityLayer
 from simulation.generator.session_transformer import SessionTransformer
 
@@ -51,6 +54,7 @@ class SessionGenerator:
         batch_size: int = 512,
         temperature: float = INFER_TEMPERATURE,
         item_temperature: float = INFER_ITEM_TEMPERATURE,
+        svdpq_scorer: str = SVDPQ_INFER_SCORER,
     ):
         self.model_path            = str(model_path)
         self.validity_layer        = validity_layer
@@ -60,6 +64,7 @@ class SessionGenerator:
         self.batch_size            = batch_size
         self.temperature           = temperature
         self.item_temperature      = item_temperature
+        self.svdpq_scorer          = svdpq_scorer
         self._model                = None    # loaded lazily
         self._sampler              = None    # loaded lazily
         # Accumulates generated sessions per user across generate() calls.
@@ -77,15 +82,23 @@ class SessionGenerator:
         )
         actual_device = next(self._model.parameters()).device
         print(f"  SessionTransformer device: {actual_device}")
-        # Attach sku2idx / idx2sku for correct item encoding/decoding in infer()
+        # Attach sku2idx / idx2sku for correct item encoding/decoding in infer().
+        # The sku+1 offset fallback only produces correct outputs when the raw
+        # SKU space happens to match the embedding index space — which it does
+        # not in practice. Warn loudly so a silent metric regression doesn't
+        # get mistaken for a model issue.
         try:
             import joblib
             from ingestion.dataset import SKU2IDX_PATH
             sku2idx = joblib.load(SKU2IDX_PATH)
             self._model._sku2idx = sku2idx
             self._model._idx2sku = {v: k for k, v in sku2idx.items()}
-        except Exception:
-            pass   # fall back to sku+1 offset if mapping not found
+        except Exception as e:
+            print(
+                f"  [warn] SessionGenerator failed to load sku2idx ({type(e).__name__}: {e}). "
+                f"Falling back to sku+1 offset — generated SKUs will NOT match the "
+                f"trained embedding index space. Rerun ingestion/preprocess to rebuild."
+            )
 
     def _load_sampler(self) -> None:
         """Optionally load IdentityFactory for generate()."""
@@ -137,6 +150,7 @@ class SessionGenerator:
             max_steps=max_steps,
             temperature=temp,
             item_temperature=item_temp,
+            svdpq_scorer=self.svdpq_scorer,
         )[0]
 
         if apply_constraints and events:
@@ -226,6 +240,7 @@ class SessionGenerator:
                 chunk,
                 temperature=self.temperature,
                 item_temperature=self.item_temperature,
+                svdpq_scorer=self.svdpq_scorer,
             )
             if apply_constraints:
                 results = [
