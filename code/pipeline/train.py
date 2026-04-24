@@ -41,10 +41,8 @@ from ingestion.dataset import (
     InteractionGenerator, get_cat_vocab, get_sku2idx, get_sku_properties,
     get_sku_tokens,
 )
-from simulation.generator.session_transformer import (
-    SessionTransformer, SVDPQItemHead,
-    ITEM_BEARING_IDX,
-)
+from simulation.generator.heads import ITEM_BEARING_IDX, SVDPQItemHead
+from simulation.generator.session_transformer import SessionTransformer
 
 
 def build_target_mask(lengths: torch.Tensor, T_out: int, device) -> torch.Tensor:

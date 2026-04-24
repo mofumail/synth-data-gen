@@ -48,7 +48,7 @@ svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token p
 # Evaluation - folder name of the trained model to evaluate (under output/models/).
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
-eval_model: session_transformer_d128_l4_h4_svdpq_t8v256_240426-10-16-52
+eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_240426-12-25-53
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads

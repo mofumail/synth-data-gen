@@ -31,9 +31,8 @@ from config import (
     CLEAN_PARQUET, HISTORY_WINDOW, OUTPUT_DIR, TRAIN_CUTOFF, VAL_CUTOFF, VOCAB_K,
     CAT2IDX_PATH, CAT_SKU_POOLS_PATH, SVDPQ_PATH,
 )
-from simulation.generator.session_transformer import (
-    ACTION2IDX, BIN_EDGES, EOS_IDX, N_TEMPORAL_BINS, TEMPORAL_MIN_S, TEMPORAL_MAX_S,
-)
+from config import N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S
+from simulation.generator.heads import ACTION2IDX, BIN_EDGES, EOS_IDX
 
 
 _CACHE_FIELDS = ("events", "items", "deltas", "categories", "offsets", "client_ids")

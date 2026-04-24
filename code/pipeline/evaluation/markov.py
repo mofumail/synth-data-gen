@@ -22,15 +22,13 @@ import polars as pl
 from tqdm import tqdm
 
 from config import CLEAN_PARQUET, ITEM_BEARING_EVENTS, TRAIN_CUTOFF
-from simulation.generator.session_transformer import (
+from config import N_TEMPORAL_BINS, TEMPORAL_MAX_S, TEMPORAL_MIN_S
+from simulation.generator.heads import (
     ACTION2IDX,
+    BIN_EDGES,
+    EOS_IDX,
     IDX2ACTION,
     N_ACTIONS,
-    EOS_IDX,
-    BIN_EDGES,
-    N_TEMPORAL_BINS,
-    TEMPORAL_MIN_S,
-    TEMPORAL_MAX_S,
     bin_to_seconds,
 )
 from simulation.validity import ValidityLayer
