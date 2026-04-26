@@ -33,7 +33,7 @@ from config import (
     MODEL_NAME, MODEL_DIR, VOCAB_K, N_TEMPORAL_BINS, HISTORY_WINDOW,
     TRAIN_EPOCHS, TRAIN_BATCH_SIZE, TRAIN_MAX_LENGTH,
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
-    TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS,
+    TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS, TRAIN_PATIENCE,
     N_CATEGORIES, CAT2IDX_PATH,
     SVDPQ_ENABLED, SVDPQ_T, SVDPQ_V, SVDPQ_LABEL_SMOOTHING,
 )
@@ -67,7 +67,8 @@ def train():
     print(f"Run:    {run_name}")
     print(f"Config: epochs={TRAIN_EPOCHS}, batch={TRAIN_BATCH_SIZE}, "
           f"d_model={TRAIN_D_MODEL}, layers={TRAIN_N_LAYERS}, heads={TRAIN_N_HEADS}, "
-          f"lr={TRAIN_LR}, max_sessions={TRAIN_MAX_SESSIONS}, n_categories={N_CATEGORIES}")
+          f"lr={TRAIN_LR}, max_sessions={TRAIN_MAX_SESSIONS}, n_categories={N_CATEGORIES}, "
+          f"patience={TRAIN_PATIENCE}")
 
     wandb.init(
         project="thesis-session-transformer",
@@ -86,6 +87,7 @@ def train():
             "history_window":  HISTORY_WINDOW,
             "max_sessions":    TRAIN_MAX_SESSIONS,
             "n_categories":    N_CATEGORIES,
+            "patience":        TRAIN_PATIENCE,
         },
     )
 
@@ -186,6 +188,7 @@ def train():
     scheduler = CosineAnnealingLR(optimizer, T_max=TRAIN_EPOCHS * len(gen), eta_min=1e-6)
 
     best_loss = float("inf")
+    epochs_no_improve = 0
 
     # Precomputed item-bearing action ids for torch.isin masking
     item_action_ids = torch.tensor(sorted(ITEM_BEARING_IDX), dtype=torch.long, device=device)
@@ -375,6 +378,7 @@ def train():
 
         if is_best:
             best_loss = val_loss
+            epochs_no_improve = 0
             ckpt_path = run_subdir / "model.pt"
             cfg_path  = run_subdir / "model.yaml"
             model.save(ckpt_path)
@@ -389,6 +393,17 @@ def train():
             print(f"  Checkpoint saved -> {ckpt_path.name}  (val_loss={best_loss:.4f})")
             wandb.summary["best_val_loss"] = best_loss
             wandb.summary["best_epoch"]    = epoch
+        else:
+            epochs_no_improve += 1
+
+        if TRAIN_PATIENCE is not None and epochs_no_improve >= TRAIN_PATIENCE:
+            print(
+                f"  Early stopping: no val_loss improvement for "
+                f"{epochs_no_improve} epoch(s) (patience={TRAIN_PATIENCE})."
+            )
+            wandb.summary["early_stopped"]      = True
+            wandb.summary["early_stopped_epoch"] = epoch
+            break
 
     print(f"\nTraining complete. Best val loss: {best_loss:.4f}")
     print(f"Model saved to: {run_subdir / 'model.pt'}")

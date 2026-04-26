@@ -67,6 +67,7 @@ TRAIN_N_LAYERS     = _cfg["train_n_layers"]
 TRAIN_N_HEADS      = _cfg["train_n_heads"]
 TRAIN_MAX_SESSIONS = _cfg["train_max_sessions"]   # None = full dataset
 TRAIN_NUM_WORKERS  = _cfg["train_num_workers"]
+TRAIN_PATIENCE     = _cfg.get("train_patience")   # None = early stopping disabled
 
 #Category head (hierarchical item loss)
 CATEGORY_RARE_THRESHOLD = _cfg["category_rare_threshold"]

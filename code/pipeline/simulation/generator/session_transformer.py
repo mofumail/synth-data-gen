@@ -277,6 +277,9 @@ class SessionTransformer(nn.Module):
         inputs are bf16 and ``need_weights=False`` (the nn.TransformerDecoder
         default), so no hand-rolled KV cache is needed at this sequence length.
 
+        The per-step body is split into small `_sample_*` helpers defined below;
+        this method is the orchestration loop.
+
         Args:
         batch_inputs     : list of (client_id, sku, start_dt, history) tuples
         max_steps        : max events per session before forced stop
@@ -296,7 +299,6 @@ class SessionTransformer(nn.Module):
         self.eval()
         device  = next(self.parameters()).device
         B       = len(batch_inputs)
-        sku2idx = getattr(self, "_sku2idx", {})
         idx2sku = getattr(self, "_idx2sku", {})
 
         autocast_ctx = (
@@ -308,142 +310,37 @@ class SessionTransformer(nn.Module):
         item_action_ids = torch.tensor(sorted(ITEM_BEARING_IDX), dtype=torch.long, device=device)
 
         with autocast_ctx:
-            # Cross-attention memory [B, 1, d_model]
-            memories = []
-            for _, _, _, history in batch_inputs:
-                if history:
-                    mem = self.history.encode(self._history_dicts_to_emb(history, device))
-                else:
-                    mem = torch.zeros(1, 1, self.d_model, device=device)
-                memories.append(mem)
-            memory = torch.cat(memories, dim=0)
+            memory = self._encode_batch_memories(batch_inputs, device)
 
-        # Seed token at position 0: synthetic page_visit on the seed item
-        seed_items = [
-            sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
-            for _, sku, _, _ in batch_inputs
-        ]
-        tok_e = torch.full((B, 1), ACTION2IDX["page_visit"], dtype=torch.long, device=device)
-        tok_i = torch.tensor([[s] for s in seed_items], dtype=torch.long, device=device)
-        tok_d = torch.zeros(B, 1, dtype=torch.long, device=device)
-        tok_c = torch.zeros(B, 1, dtype=torch.long, device=device)
+        tok_e, tok_i, tok_d, tok_c, client_ids, current_dts = self._seed_tokens(
+            batch_inputs, device
+        )
 
-        done        = torch.zeros(B, dtype=torch.bool, device=device)
-        events_out  = [[] for _ in range(B)]
-        current_dts = [
-            pd.Timestamp(sdt) if not isinstance(sdt, pd.Timestamp) else sdt
-            for _, _, sdt, _ in batch_inputs
-        ]
-        client_ids = [bi[0] for bi in batch_inputs]
+        done       = torch.zeros(B, dtype=torch.bool, device=device)
+        events_out = [[] for _ in range(B)]
 
         for step in range(max_steps):
             if done.all():
                 break
 
-            T = step + 1
+            T   = step + 1
             pos = torch.arange(T, device=device).unsqueeze(0)
 
             with autocast_ctx:
                 x = self._build_input(tok_e, tok_i, tok_d, tok_c, pos)
                 tgt_mask = nn.Transformer.generate_square_subsequent_mask(T, device=device)
-                h = self.decoder(x, memory, tgt_mask=tgt_mask, tgt_is_causal=True)
+                h   = self.decoder(x, memory, tgt_mask=tgt_mask, tgt_is_causal=True)
                 h_t = h[:, -1, :]                                 # [B, d_model]
 
-                # Action
-                a_logits = self.action_head(h_t) / temperature
-                a_probs  = F.softmax(a_logits.float(), dim=-1)
-                a_idxs   = torch.multinomial(a_probs, 1).squeeze(1)
+                a_idxs     = self._sample_action(h_t, temperature)
                 newly_done = (a_idxs == EOS_IDX) | done
+                is_item    = torch.isin(a_idxs, item_action_ids) & ~done
 
-                # Item mask (item-bearing, not already-done)
-                is_item = torch.isin(a_idxs, item_action_ids) & ~done
+                i_idxs, c_full = self._sample_items(
+                    h_t, a_idxs, is_item, temperature, item_temperature, svdpq_scorer,
+                )
 
-                i_idxs = torch.zeros(B, dtype=torch.long, device=device)
-                c_full = torch.zeros(B, dtype=torch.long, device=device)
-                if is_item.any():
-                    h_item = h_t[is_item]
-                    a_item = a_idxs[is_item]
-
-                    cat_logits = self.category_head(h_item, a_item) / temperature
-                    # Mask categories with no SKU pool (otherwise we'd emit a
-                    # PAD-sku event and ValidityLayer would drop the session).
-                    if hasattr(self, "empty_cat_mask"):
-                        cat_logits = cat_logits.masked_fill(
-                            self.empty_cat_mask.unsqueeze(0), float("-inf"),
-                        )
-                    cat_probs  = F.softmax(cat_logits.float(), dim=-1)
-                    c_idxs     = torch.multinomial(cat_probs, 1).squeeze(1)
-
-                    pools = self._cat_sku_pools
-                    c_list = c_idxs.cpu().tolist()
-                    item_result = torch.zeros(is_item.sum(), dtype=torch.long, device=device)
-
-                    if isinstance(self.item_head, SVDPQItemHead):
-                        # SVD-PQ inference. Two scorers share the per-dim logits
-                        # but differ in how they map them to a single pool SKU:
-                        #   hamming  : sample tokens, rank pool by match count (coarse — integer counts)
-                        #   log_prob : rank pool by sum of per-dim log-probs of its tokens (factored likelihood)
-                        cond  = self.item_head._cond(h_item, a_item, c_idxs)
-                        t_, v_ = self.item_head.t, self.item_head.v
-                        logits = self.item_head.fc(cond).view(-1, t_, v_)   # [M, t, v]
-                        inv_T  = 1.0 / max(item_temperature, 1e-6)
-
-                        if svdpq_scorer == "hamming":
-                            probs_tok   = F.softmax(logits.float() * inv_T, dim=-1)
-                            M_          = probs_tok.size(0)
-                            pred_tokens = torch.multinomial(
-                                probs_tok.reshape(M_ * t_, v_), 1
-                            ).view(M_, t_)                                  # [M, t]
-                            for m, ci in enumerate(c_list):
-                                pool = pools[ci] if pools is not None and ci < len(pools) else None
-                                assert pool is not None and len(pool) > 0, (
-                                    f"empty_cat_mask failed: category {ci} has no SKU pool"
-                                )
-                                pool_tokens = self.item_head.sku_tokens[pool]           # [P, t]
-                                match = (pool_tokens == pred_tokens[m]).sum(dim=-1)     # [P]
-                                k_fb = len(pool)
-                                top_v, top_idx = match.topk(k_fb)
-                                pick_probs = F.softmax(top_v.float() * inv_T, dim=-1)
-                                item_result[m] = pool[top_idx[int(torch.multinomial(pick_probs, 1).item())]]
-                        else:  # log_prob
-                            log_probs = F.log_softmax(logits.float() * inv_T, dim=-1)   # [M, t, v]
-                            for m, ci in enumerate(c_list):
-                                pool = pools[ci] if pools is not None and ci < len(pools) else None
-                                assert pool is not None and len(pool) > 0, (
-                                    f"empty_cat_mask failed: category {ci} has no SKU pool"
-                                )
-                                pool_tokens = self.item_head.sku_tokens[pool]           # [P, t]
-                                # scores[p] = sum_k log p(pool_tokens[p, k] | ...)
-                                scores = log_probs[m].gather(1, pool_tokens.T).sum(dim=0)  # [P]
-                                pick_probs = F.softmax(scores, dim=-1)
-                                item_result[m] = pool[int(torch.multinomial(pick_probs, 1).item())]
-                    else:
-                        for m, ci in enumerate(c_list):
-                            pool = pools[ci] if pools is not None and ci < len(pools) else None
-                            assert pool is not None and len(pool) > 0, (
-                                f"empty_cat_mask failed: category {ci} has no SKU pool"
-                            )
-                            h_m  = h_item[m:m+1]
-                            a_m  = a_item[m:m+1]
-                            c_m  = c_idxs[m:m+1]
-                            w_pool = self.item_head.fc.weight.index_select(0, pool)
-                            b_pool = self.item_head.fc.bias.index_select(0, pool)
-                            cond   = (
-                                h_m
-                                + self.item_head.action_cond(a_m)
-                                + self.item_head.category_cond(c_m)
-                            )
-                            logits = (cond @ w_pool.t() + b_pool) / item_temperature
-                            probs  = F.softmax(logits.float(), dim=-1)
-                            item_result[m] = pool[int(torch.multinomial(probs, 1).item())]
-                    i_idxs[is_item] = item_result
-                    c_full[is_item] = c_idxs
-
-                # Temporal
-                i_emb_t  = self.item_emb(i_idxs)
-                d_logits = self.temporal_head(h_t, a_idxs, i_emb_t) / temperature
-                d_probs  = F.softmax(d_logits.float(), dim=-1)
-                bin_idxs = torch.multinomial(d_probs, 1).squeeze(1)
+                bin_idxs = self._sample_temporal(h_t, a_idxs, i_idxs, temperature)
 
             # Bulk CPU transfer, one sync per step instead of 3×B individual .item() calls
             a_list    = a_idxs.cpu().tolist()
@@ -477,6 +374,212 @@ class SessionTransformer(nn.Module):
             done  = newly_done
 
         return events_out
+
+    # infer_batch per-step helpers
+
+    def _encode_batch_memories(
+        self,
+        batch_inputs: List[tuple],
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Cross-attention memory [B, 1, d_model] from per-row history lists."""
+        memories = []
+        for _, _, _, history in batch_inputs:
+            if history:
+                mem = self.history.encode(self._history_dicts_to_emb(history, device))
+            else:
+                mem = torch.zeros(1, 1, self.d_model, device=device)
+            memories.append(mem)
+        return torch.cat(memories, dim=0)
+
+    def _seed_tokens(
+        self,
+        batch_inputs: List[tuple],
+        device: torch.device,
+    ):
+        """
+        Seed token at position 0: one synthetic page_visit per row on the seed
+        SKU. Also materializes per-row client_ids and current_dts used by the
+        event-emission loop.
+        """
+        B = len(batch_inputs)
+        sku2idx = getattr(self, "_sku2idx", {})
+        seed_items = [
+            sku2idx.get(int(sku), 0) if sku2idx else min(int(sku) + 1, self.vocab_size - 1)
+            for _, sku, _, _ in batch_inputs
+        ]
+        tok_e = torch.full((B, 1), ACTION2IDX["page_visit"], dtype=torch.long, device=device)
+        tok_i = torch.tensor([[s] for s in seed_items], dtype=torch.long, device=device)
+        tok_d = torch.zeros(B, 1, dtype=torch.long, device=device)
+        tok_c = torch.zeros(B, 1, dtype=torch.long, device=device)
+        current_dts = [
+            pd.Timestamp(sdt) if not isinstance(sdt, pd.Timestamp) else sdt
+            for _, _, sdt, _ in batch_inputs
+        ]
+        client_ids = [bi[0] for bi in batch_inputs]
+        return tok_e, tok_i, tok_d, tok_c, client_ids, current_dts
+
+    def _sample_action(
+        self,
+        h_t: torch.Tensor,
+        temperature: float,
+    ) -> torch.Tensor:
+        """Action head → softmax → multinomial. Returns [B] action indices."""
+        a_logits = self.action_head(h_t) / temperature
+        a_probs  = F.softmax(a_logits.float(), dim=-1)
+        return torch.multinomial(a_probs, 1).squeeze(1)
+
+    def _sample_items(
+        self,
+        h_t: torch.Tensor,
+        a_idxs: torch.Tensor,
+        is_item: torch.Tensor,
+        temperature: float,
+        item_temperature: float,
+        svdpq_scorer: str,
+    ):
+        """
+        Category + item sampling at item-bearing rows.
+
+        Returns (i_idxs, c_full), both [B] with 0 at non-item rows. Category
+        masking via `empty_cat_mask` is applied here once; the per-pool helpers
+        trust that every sampled category has a non-empty SKU pool.
+        """
+        B = h_t.size(0)
+        device = h_t.device
+        i_idxs = torch.zeros(B, dtype=torch.long, device=device)
+        c_full = torch.zeros(B, dtype=torch.long, device=device)
+        if not is_item.any():
+            return i_idxs, c_full
+
+        h_item = h_t[is_item]
+        a_item = a_idxs[is_item]
+
+        cat_logits = self.category_head(h_item, a_item) / temperature
+        # Mask categories with no SKU pool (otherwise we'd emit a PAD-sku event
+        # and ValidityLayer would drop the session).
+        if hasattr(self, "empty_cat_mask"):
+            cat_logits = cat_logits.masked_fill(
+                self.empty_cat_mask.unsqueeze(0), float("-inf"),
+            )
+        cat_probs = F.softmax(cat_logits.float(), dim=-1)
+        c_idxs    = torch.multinomial(cat_probs, 1).squeeze(1)
+
+        pools  = self._cat_sku_pools
+        c_list = c_idxs.cpu().tolist()
+        if isinstance(self.item_head, SVDPQItemHead):
+            item_result = self._sample_svdpq_pool(
+                h_item, a_item, c_idxs, c_list, pools, item_temperature, svdpq_scorer,
+            )
+        else:
+            item_result = self._sample_flat_pool(
+                h_item, a_item, c_idxs, c_list, pools, item_temperature,
+            )
+
+        i_idxs[is_item] = item_result
+        c_full[is_item] = c_idxs
+        return i_idxs, c_full
+
+    def _sample_svdpq_pool(
+        self,
+        h_item: torch.Tensor,
+        a_item: torch.Tensor,
+        c_idxs: torch.Tensor,
+        c_list: list,
+        pools,
+        item_temperature: float,
+        scorer: str,
+    ) -> torch.Tensor:
+        """
+        SVD-PQ pool scoring. Two scorers share the per-dim logits but differ in
+        how they map them to a single pool SKU:
+          hamming  : sample tokens, rank pool by match count (coarse — integer counts)
+          log_prob : rank pool by sum of per-dim log-probs of its tokens (factored likelihood)
+        """
+        cond   = self.item_head._cond(h_item, a_item, c_idxs)
+        t_, v_ = self.item_head.t, self.item_head.v
+        logits = self.item_head.fc(cond).view(-1, t_, v_)   # [M, t, v]
+        inv_T  = 1.0 / max(item_temperature, 1e-6)
+        M_     = logits.size(0)
+        item_result = torch.zeros(M_, dtype=torch.long, device=h_item.device)
+
+        if scorer == "hamming":
+            probs_tok   = F.softmax(logits.float() * inv_T, dim=-1)
+            pred_tokens = torch.multinomial(
+                probs_tok.reshape(M_ * t_, v_), 1
+            ).view(M_, t_)                                  # [M, t]
+            for m, ci in enumerate(c_list):
+                pool = pools[ci] if pools is not None and ci < len(pools) else None
+                assert pool is not None and len(pool) > 0, (
+                    f"empty_cat_mask failed: category {ci} has no SKU pool"
+                )
+                pool_tokens = self.item_head.sku_tokens[pool]           # [P, t]
+                match = (pool_tokens == pred_tokens[m]).sum(dim=-1)     # [P]
+                k_fb = len(pool)
+                top_v, top_idx = match.topk(k_fb)
+                pick_probs = F.softmax(top_v.float() * inv_T, dim=-1)
+                item_result[m] = pool[top_idx[int(torch.multinomial(pick_probs, 1).item())]]
+        else:  # log_prob
+            log_probs = F.log_softmax(logits.float() * inv_T, dim=-1)   # [M, t, v]
+            for m, ci in enumerate(c_list):
+                pool = pools[ci] if pools is not None and ci < len(pools) else None
+                assert pool is not None and len(pool) > 0, (
+                    f"empty_cat_mask failed: category {ci} has no SKU pool"
+                )
+                pool_tokens = self.item_head.sku_tokens[pool]           # [P, t]
+                # scores[p] = sum_k log p(pool_tokens[p, k] | ...)
+                scores = log_probs[m].gather(1, pool_tokens.T).sum(dim=0)  # [P]
+                pick_probs = F.softmax(scores, dim=-1)
+                item_result[m] = pool[int(torch.multinomial(pick_probs, 1).item())]
+        return item_result
+
+    def _sample_flat_pool(
+        self,
+        h_item: torch.Tensor,
+        a_item: torch.Tensor,
+        c_idxs: torch.Tensor,
+        c_list: list,
+        pools,
+        item_temperature: float,
+    ) -> torch.Tensor:
+        """
+        Flat-vocab pool scoring: score only the pool-SKU slice of the item-head
+        weight matrix, then softmax over the pool and multinomial.
+        """
+        M_ = h_item.size(0)
+        item_result = torch.zeros(M_, dtype=torch.long, device=h_item.device)
+        for m, ci in enumerate(c_list):
+            pool = pools[ci] if pools is not None and ci < len(pools) else None
+            assert pool is not None and len(pool) > 0, (
+                f"empty_cat_mask failed: category {ci} has no SKU pool"
+            )
+            h_m  = h_item[m:m+1]
+            a_m  = a_item[m:m+1]
+            c_m  = c_idxs[m:m+1]
+            w_pool = self.item_head.fc.weight.index_select(0, pool)
+            b_pool = self.item_head.fc.bias.index_select(0, pool)
+            cond   = (
+                h_m
+                + self.item_head.action_cond(a_m)
+                + self.item_head.category_cond(c_m)
+            )
+            logits = (cond @ w_pool.t() + b_pool) / item_temperature
+            probs  = F.softmax(logits.float(), dim=-1)
+            item_result[m] = pool[int(torch.multinomial(probs, 1).item())]
+        return item_result
+
+    def _sample_temporal(
+        self,
+        h_t: torch.Tensor,
+        a_idxs: torch.Tensor,
+        i_idxs: torch.Tensor,
+        temperature: float,
+    ) -> torch.Tensor:
+        """Temporal head → softmax → multinomial. Returns [B] delta-bin indices."""
+        i_emb_t  = self.item_emb(i_idxs)
+        d_logits = self.temporal_head(h_t, a_idxs, i_emb_t) / temperature
+        d_probs  = F.softmax(d_logits.float(), dim=-1)
+        return torch.multinomial(d_probs, 1).squeeze(1)
 
     # Checkpoint I/O
 

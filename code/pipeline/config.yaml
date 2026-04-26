@@ -34,6 +34,7 @@ train_n_layers:     4          # number of decoder layers
 train_n_heads:      4          # attention heads (must divide d_model)
 train_max_sessions: null       # null = use all sessions; set int for smoke tests
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
+train_patience:     5          # early stop after this many epochs without val_loss improvement (null = off)
 
 # Category head (hierarchical mode)
 category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token, based on notbooks/cat_rare_treshhold.py
@@ -43,23 +44,26 @@ category_rare_threshold: 5   # categories with <= this many SKUs are collapsed t
 svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
-svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token peakedness so the t-factor joint doesn't collapse to winner-take-all. 0.0 = off.
+svdpq_label_smoothing:  0.0       # per-dim CE label smoothing; caps per-token peakedness so the t-factor joint doesn't collapse to winner-take-all. 0.0 = off.
 
 # Evaluation - folder name of the trained model to evaluate (under output/models/).
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
+
 eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_240426-12-25-53
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
 infer_item_temperature: 1.0     # item head (SVD-PQ Hamming score or flat pool softmax)
+
 # SVD-PQ inference scorer: how to pick the final in-pool SKU from the t per-dim softmaxes.
 #   hamming  : sample t tokens, rank pool SKUs by count of matching tokens (legacy)
 #   log_prob : score each pool SKU by sum of log-probs of its t tokens under the head (true factored likelihood)
-svdpq_infer_scorer:     log_prob   # hamming | log_prob
+svdpq_infer_scorer:     hamming  # hamming | log_prob
 svdpq_binning:          quantile   # quantile | uniform , quantile seems better; offers even bin sizes
 svdpq_noise_std:        0.00001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
 svdpq_min_interactions: 2          # below this -> category-centroid cold-start fallback, # based on : notebooks/interactions.py
+
 # The knee is somewhere inbetween 1 - 2
 # The jump from treshhold 1-2 is 27.3pp, to 29.8pp from 2-3
 
