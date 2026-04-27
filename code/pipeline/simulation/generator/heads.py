@@ -158,11 +158,15 @@ class ItemHead(nn.Module):
         action_t: torch.Tensor,       # [M]
         category_t: torch.Tensor,     # [M] dense cat indices
         sku_ids: torch.Tensor,        # [M] target sku indices (global)
+        sample_weights: Optional[torch.Tensor] = None,  # [M] per-event CE weights
     ) -> torch.Tensor:
         """
         Vectorized masked cross-entropy: compute full logits over the entire
         vocab, mask out-of-category items to -inf, then standard CE with global
         SKU targets.  Softmax normalizes only over in-category items.
+
+        sample_weights: optional [M] tensor of per-event CE weights. None -> mean
+        reduction (vanilla CE). Used for inverse-frequency reweighting.
         """
         cond = h_t + self.action_cond(action_t)
         if self.category_cond is not None:
@@ -170,12 +174,15 @@ class ItemHead(nn.Module):
         logits = self.fc(cond)                                           # [M, V]
         mask = self.sku_cat.unsqueeze(0) == category_t.unsqueeze(1)      # [M, V]
         logits = logits.masked_fill(~mask, float('-inf'))
-        return F.cross_entropy(logits, sku_ids)
+        if sample_weights is None:
+            return F.cross_entropy(logits, sku_ids)
+        per = F.cross_entropy(logits, sku_ids, reduction='none')         # [M]
+        return (per * sample_weights).sum() / sample_weights.sum().clamp_min(1e-12)
 
     # Polymorphic alias so train.py can call item_head.loss(...) for both
     # ItemHead (flat hierarchical) and SVDPQItemHead (token factored) uniformly.
-    def loss(self, h_t, action_t, category_t, sku_ids):
-        return self.hierarchical_loss(h_t, action_t, category_t, sku_ids)
+    def loss(self, h_t, action_t, category_t, sku_ids, sample_weights=None):
+        return self.hierarchical_loss(h_t, action_t, category_t, sku_ids, sample_weights)
 
 
 class SVDPQItemHead(nn.Module):
@@ -239,16 +246,32 @@ class SVDPQItemHead(nn.Module):
         action_t: torch.Tensor,   # [M]
         category_t: torch.Tensor, # [M] dense cat indices
         sku_ids: torch.Tensor,    # [M] global SKU indices
+        sample_weights: Optional[torch.Tensor] = None,  # [M] per-event CE weights
     ) -> torch.Tensor:
-        """Mean CE over M*t token positions."""
+        """
+        Mean CE over M*t token positions.
+
+        sample_weights: optional [M] per-event weights. Replicated across the t
+        token positions of each event so all t tokens for SKU s share weight w_s.
+        None -> uniform mean reduction (vanilla CE).
+        """
         cond = self._cond(h_t, action_t, category_t)
         logits = self.fc(cond).view(-1, self.t, self.v)        # [M, t, v]
         targets = self.sku_tokens[sku_ids]                     # [M, t]
-        return F.cross_entropy(
+        if sample_weights is None:
+            return F.cross_entropy(
+                logits.reshape(-1, self.v),
+                targets.reshape(-1),
+                label_smoothing=self.label_smoothing,
+            )
+        per = F.cross_entropy(
             logits.reshape(-1, self.v),
             targets.reshape(-1),
+            reduction='none',
             label_smoothing=self.label_smoothing,
-        )
+        )                                                      # [M*t]
+        w = sample_weights.unsqueeze(1).expand(-1, self.t).reshape(-1)  # [M*t]
+        return (per * w).sum() / w.sum().clamp_min(1e-12)
 
     def predict_tokens(
         self,

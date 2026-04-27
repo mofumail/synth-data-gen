@@ -295,6 +295,7 @@ def run_fidelity_only(args):
 
 
 def parse_args():
+    from config import FINAL_EVAL_N_SESSIONS, FINAL_EVAL_SEEDS
     p = argparse.ArgumentParser(description="Evaluate synthetic session generator")
     p.add_argument("--max-train",      type=int,   default=None,
                    help="Cap training sessions (default: all)")
@@ -302,10 +303,12 @@ def parse_args():
                    help="Cap val sessions (default: all)")
     p.add_argument("--max-test",       type=int,   default=None,
                    help="Cap test sessions (default: all)")
-    p.add_argument("--num-seeds",      type=int,   default=5)
-    p.add_argument("--base-seed",      type=int,   default=42)
-    p.add_argument("--n-sessions",     type=int,   default=1000000,
-                   help="Synthetic sessions to generate per seed")
+    p.add_argument("--num-seeds",      type=int,   default=len(FINAL_EVAL_SEEDS),
+                   help=f"Number of seeds (config default: {len(FINAL_EVAL_SEEDS)})")
+    p.add_argument("--base-seed",      type=int,   default=FINAL_EVAL_SEEDS[0] if FINAL_EVAL_SEEDS else 42,
+                   help=f"Starting seed (config default: {FINAL_EVAL_SEEDS[0] if FINAL_EVAL_SEEDS else 42})")
+    p.add_argument("--n-sessions",     type=int,   default=FINAL_EVAL_N_SESSIONS,
+                   help=f"Synthetic sessions per seed (config default: {FINAL_EVAL_N_SESSIONS:,})")
     p.add_argument("--k",              type=int,   default=10,
                    help="Cutoff for HR@K and NDCG@K")
     p.add_argument("--final",          action="store_true",

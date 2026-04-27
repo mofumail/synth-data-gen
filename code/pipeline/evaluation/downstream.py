@@ -406,12 +406,15 @@ class DownstreamEvaluator:
         Returns:
             List of UtilityResult in the same order as `conditions`.
         """
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-
         # --- Train all adapters ---
+        # Re-seed before EACH fit so the adapter's init/shuffle/etc. don't
+        # depend on how much randomness earlier adapters consumed (vocab size,
+        # epoch count via early stopping, etc.). Without this, TRTR drifts
+        # whenever upstream synth data changes the TSTR-T/TSTR-M trajectories.
         adapters: dict = {}
         for condition, train_sessions in conditions:
+            np.random.seed(seed)
+            torch.manual_seed(seed)
             adapter = self.adapter_cls()
             adapter.fit(train_sessions, label=condition)
             adapters[condition] = adapter

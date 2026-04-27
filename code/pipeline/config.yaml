@@ -50,7 +50,7 @@ svdpq_label_smoothing:  0.0       # per-dim CE label smoothing; caps per-token p
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
 
-eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_240426-12-25-53
+eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_260426-19-38-52
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
@@ -73,6 +73,16 @@ svdpq_event_weights:     # decided based on notebooks/tf-idf-weights.py, inverse
   remove_from_cart:   3.7798
   page_visit:         0.2513
   search_query:       2.1683
+
+# Popularity-bias mitigation (train-time only; inference path untouched).
+# A : per-event inverse-frequency weighting on the item CE loss.
+#     w_sku = (count + 1) ** -alpha, normalized so E_data[w] = 1.
+#     0.0 = off (loss identical to vanilla CE).  Try 0.5 - 0.75.
+# B : Menon et al. 2021 logit adjustment on the category CE loss.
+#     train_logits = raw_logits + tau * log(category_prior).
+#     0.0 = off.  1.0 = Bayes-optimal correction for class imbalance.
+item_loss_freq_weight_alpha: 0.5 # 0.5
+cat_logit_adj_tau:           1.0 # 1.0 
 
 # GRU4Rec downstream evaluator
 gru4rec_embed_dim:   64

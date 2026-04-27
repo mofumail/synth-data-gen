@@ -86,6 +86,49 @@ if not 0.0 <= SVDPQ_LABEL_SMOOTHING < 1.0:
         f"svdpq_label_smoothing must be in [0, 1), got {SVDPQ_LABEL_SMOOTHING}"
     )
 
+#Popularity-bias mitigation
+ITEM_LOSS_FREQ_WEIGHT_ALPHA = float(_cfg.get("item_loss_freq_weight_alpha", 0.0))
+if ITEM_LOSS_FREQ_WEIGHT_ALPHA < 0.0:
+    raise ValueError(
+        f"item_loss_freq_weight_alpha must be >= 0, got {ITEM_LOSS_FREQ_WEIGHT_ALPHA}"
+    )
+CAT_LOGIT_ADJ_TAU = float(_cfg.get("cat_logit_adj_tau", 0.0))
+if CAT_LOGIT_ADJ_TAU < 0.0:
+    raise ValueError(
+        f"cat_logit_adj_tau must be >= 0, got {CAT_LOGIT_ADJ_TAU}"
+    )
+
+#Multi-task loss head weighting. Index map:
+#   [0] action_loss   [1] category_loss   [2] item_loss   [3] temporal_loss
+LOSS_WEIGHTS_ENABLED = bool(_cfg.get("loss_weights_enabled", False))
+LOSS_WEIGHTS         = list(_cfg.get("loss_weights", [1.0, 1.0, 1.0, 1.0]))
+if len(LOSS_WEIGHTS) != 4:
+    raise ValueError(
+        f"loss_weights must have 4 entries (action, category, item, temporal), "
+        f"got {len(LOSS_WEIGHTS)}: {LOSS_WEIGHTS}"
+    )
+LOSS_WEIGHTS = [float(w) for w in LOSS_WEIGHTS]
+if any(w < 0.0 for w in LOSS_WEIGHTS):
+    raise ValueError(f"loss_weights must be non-negative, got {LOSS_WEIGHTS}")
+
+#In-training TSTR-T probe (defaults preserve current val_loss-based is_best
+#when keys are absent from config.yaml).
+IS_BEST_EVAL_ENABLED        = bool(_cfg.get("is_best_eval_enabled", False))
+IS_BEST_EVAL_EVERY_N_EPOCHS = int(_cfg.get("is_best_eval_every_n_epochs", 5))
+IS_BEST_EVAL_N_SESSIONS     = int(_cfg.get("is_best_eval_n_sessions", 200_000))
+IS_BEST_EVAL_SEEDS          = list(_cfg.get("is_best_eval_seeds", [42, 43, 44]))
+IS_BEST_EVAL_K              = int(_cfg.get("is_best_eval_k", 10))
+if IS_BEST_EVAL_EVERY_N_EPOCHS < 1:
+    raise ValueError(
+        f"is_best_eval_every_n_epochs must be >= 1, got {IS_BEST_EVAL_EVERY_N_EPOCHS}"
+    )
+if IS_BEST_EVAL_ENABLED and not IS_BEST_EVAL_SEEDS:
+    raise ValueError("is_best_eval_seeds must be a non-empty list when probe is enabled")
+
+#Final evaluation scale (consumed by evaluate.py once training finishes).
+FINAL_EVAL_N_SESSIONS = int(_cfg.get("final_eval_n_sessions", 500_000))
+FINAL_EVAL_SEEDS      = list(_cfg.get("final_eval_seeds", [42, 43, 44]))
+
 #Inference sampling
 INFER_TEMPERATURE      = _cfg["infer_temperature"]
 INFER_ITEM_TEMPERATURE = _cfg["infer_item_temperature"]
