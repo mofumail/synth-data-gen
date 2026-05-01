@@ -34,7 +34,7 @@ train_n_layers:     4          # number of decoder layers
 train_n_heads:      4          # attention heads (must divide d_model)
 train_max_sessions: null       # null = use all sessions; set int for smoke tests
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
-train_patience:     5          # early stop after this many epochs without val_loss improvement (null = off)
+train_patience:     5          # in TSTR mode: probes (not epochs) without HR improvement before stop
 
 # Category head (hierarchical mode)
 category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token, based on notbooks/cat_rare_treshhold.py
@@ -44,13 +44,13 @@ category_rare_threshold: 5   # categories with <= this many SKUs are collapsed t
 svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
-svdpq_label_smoothing:  0.0       # per-dim CE label smoothing; caps per-token peakedness so the t-factor joint doesn't collapse to winner-take-all. 0.0 = off.
+svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token peakedness so the t-factor joint doesn't collapse to winner-take-all. 0.0 = off.
 
 # Evaluation - folder name of the trained model to evaluate (under output/models/).
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
 
-eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_260426-19-38-52
+eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_290426-16-24-42_ilfa_0.5-cat_logit_1.0
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
@@ -59,7 +59,7 @@ infer_item_temperature: 1.0     # item head (SVD-PQ Hamming score or flat pool s
 # SVD-PQ inference scorer: how to pick the final in-pool SKU from the t per-dim softmaxes.
 #   hamming  : sample t tokens, rank pool SKUs by count of matching tokens (legacy)
 #   log_prob : score each pool SKU by sum of log-probs of its t tokens under the head (true factored likelihood)
-svdpq_infer_scorer:     hamming  # hamming | log_prob
+svdpq_infer_scorer:     log_prob  # hamming | log_prob
 svdpq_binning:          quantile   # quantile | uniform , quantile seems better; offers even bin sizes
 svdpq_noise_std:        0.00001     # pre-bin Gaussian noise stddev (on [0,1]-scaled embs)
 svdpq_min_interactions: 2          # below this -> category-centroid cold-start fallback, # based on : notebooks/interactions.py
@@ -74,6 +74,19 @@ svdpq_event_weights:     # decided based on notebooks/tf-idf-weights.py, inverse
   page_visit:         0.2513
   search_query:       2.1683
 
+# Multi-task loss head weighting. Scales each per-head CE before summing into
+# the total loss the optimizer sees. enabled=false -> plain sum (legacy).
+# loss_weights index map (must have exactly 4 entries):
+#   [0] action_loss   - next-action CE over all real positions
+#   [1] category_loss - next-category CE at item-bearing positions
+#   [2] item_loss     - next-item   CE at item-bearing positions
+#   [3] temporal_loss - next-delta-bin CE over all real positions
+# Item CE is ~12 nats (200K classes) vs ~1-5 for the others, so the unweighted
+# sum is item-dominated. Down-weighting [2] / up-weighting [0,1,3] gives the
+# other heads more gradient budget without changing is_best (which is TSTR HR).
+loss_weights_enabled: false
+loss_weights:        [1.0, 1.0, 1.0, 1.0]
+
 # Popularity-bias mitigation (train-time only; inference path untouched).
 # A : per-event inverse-frequency weighting on the item CE loss.
 #     w_sku = (count + 1) ** -alpha, normalized so E_data[w] = 1.
@@ -82,14 +95,29 @@ svdpq_event_weights:     # decided based on notebooks/tf-idf-weights.py, inverse
 #     train_logits = raw_logits + tau * log(category_prior).
 #     0.0 = off.  1.0 = Bayes-optimal correction for class imbalance.
 item_loss_freq_weight_alpha: 0.5 # 0.5
-cat_logit_adj_tau:           1.0 # 1.0 
+cat_logit_adj_tau:           1.0 # 1.0
+
+# In-training TSTR-T probe (drives is_best checkpoint selection).
+# When enabled, every is_best_eval_every_n_epochs the model is frozen,
+# n synthetic sessions are generated per seed, GRU4Rec is fit on each
+# and evaluated on the real val split. Mean HR@K across seeds replaces
+# val_loss as the is_best signal. Disabled -> falls back to val_loss.
+is_best_eval_enabled:        false
+is_best_eval_every_n_epochs: 5
+is_best_eval_n_sessions:     200000
+is_best_eval_seeds:          [42, 43, 44]
+is_best_eval_k:              10
+
+# Final-evaluation scale (consumed by evaluate.py once training is done).
+final_eval_n_sessions: 500000
+final_eval_seeds:      [42, 43, 44]
 
 # GRU4Rec downstream evaluator
 gru4rec_embed_dim:   64
 gru4rec_hidden_dim:  128
 gru4rec_max_epochs:  30
 gru4rec_batch_size:  16
-gru4rec_vocab_k:     50000   # cap output vocab to top-K items by freq; prevents OOM with large Markov item pools
+gru4rec_vocab_k:     200000   # cap output vocab to top-K items by freq; prevents OOM with large Markov item pools
 gru4rec_lr:          0.001
 gru4rec_patience:    5
 gru4rec_lr_patience: 3

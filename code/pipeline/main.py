@@ -31,6 +31,14 @@ STAGE_CMDS = {
 }
 
 
+_COMMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+def sanitize_comment(s: str) -> str:
+    s = _COMMENT_RE.sub("_", s.strip()).strip("_")
+    return s
+
+
 def run_stage(name: str, extra_args: list[str] | None = None) -> None:
     script = STAGE_CMDS[name]
     cmd = [sys.executable, *script, *(extra_args or [])]
@@ -50,6 +58,15 @@ def latest_trained_model() -> str:
     import importlib
     import config as _config
     importlib.reload(_config)
+
+    # Prefer the sentinel train.py writes at run start: survives config.yaml
+    # edits made between train start and this lookup (e.g. flipping
+    # svdpq_enabled, which changes MODEL_NAME's prefix).
+    sentinel = _config.MODEL_DIR / ".last_run"
+    if sentinel.exists():
+        name = sentinel.read_text().strip()
+        if name and (_config.MODEL_DIR / name / "model.pt").exists():
+            return name
 
     candidates = [
         p for p in _config.MODEL_DIR.glob(f"{_config.MODEL_NAME}_*")
@@ -93,6 +110,10 @@ def parse_args() -> tuple[list[str], list[str]]:
         "--from", dest="from_stage", choices=STAGES, default=None,
         help="Run this stage and every stage after it. Overrides --stages.",
     )
+    p.add_argument(
+        "--comment", default=None,
+        help="Suffix appended to the train run folder name for easier identification.",
+    )
     # Everything unknown is forwarded to evaluate.py.
     ns, forwarded = p.parse_known_args()
 
@@ -104,14 +125,17 @@ def parse_args() -> tuple[list[str], list[str]]:
         bad = [s for s in stages if s not in STAGES]
         if bad:
             p.error(f"unknown stage(s): {bad}. Valid: {STAGES}")
-    return stages, forwarded
+    comment = sanitize_comment(ns.comment) if ns.comment else None
+    return stages, forwarded, comment
 
 
 def main() -> None:
-    stages, eval_args = parse_args()
+    stages, eval_args, comment = parse_args()
     print(f"[main] plan: {' -> '.join(stages)}")
     if eval_args:
         print(f"[main] evaluate args: {eval_args}")
+    if comment:
+        print(f"[main] run comment: {comment}")
 
     for stage in stages:
         if stage == "evaluate":
@@ -121,6 +145,8 @@ def main() -> None:
             if "train" in stages or not cfg.get("eval_model"):
                 update_eval_model(latest_trained_model())
             run_stage("evaluate", eval_args)
+        elif stage == "train" and comment:
+            run_stage("train", ["--comment", comment])
         else:
             run_stage(stage)
 

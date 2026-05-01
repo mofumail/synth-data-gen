@@ -16,6 +16,8 @@ run, per-epoch "is_best" checkpoints overwrite model.pt / model.yaml inside
 that same folder. A config.yaml snapshot is written alongside the checkpoint.
 """
 
+import argparse
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -61,12 +63,16 @@ def build_target_mask(lengths: torch.Tensor, T_out: int, device) -> torch.Tensor
     return positions < (lengths.to(device).unsqueeze(1) - 1)       # [B, T_out]
 
 
-def train():
+def train(comment: str | None = None):
     # Stamp the run once at start so every epoch writes into the same folder.
     run_stamp  = datetime.now().strftime("%d%m%y-%H-%M-%S")
-    run_name   = f"{MODEL_NAME}_{run_stamp}"
+    suffix     = f"_{comment}" if comment else ""
+    run_name   = f"{MODEL_NAME}_{run_stamp}{suffix}"
     run_subdir = MODEL_DIR / run_name
     run_subdir.mkdir(parents=True, exist_ok=True)
+    # Record the run folder so main.py can find it after training even if
+    # config.yaml (and thus MODEL_NAME) changed mid-run.
+    (MODEL_DIR / ".last_run").write_text(run_name)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}")
@@ -672,4 +678,14 @@ def train():
 
 
 if __name__ == "__main__":
-    train()
+    p = argparse.ArgumentParser()
+    p.add_argument(
+        "--comment", default=None,
+        help="Suffix appended to the run folder name for easier identification.",
+    )
+    args = p.parse_args()
+    comment = (
+        re.sub(r"[^A-Za-z0-9._-]+", "_", args.comment.strip()).strip("_")
+        if args.comment else None
+    )
+    train(comment=comment)
