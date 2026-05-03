@@ -167,6 +167,7 @@ class SessionTransformer(nn.Module):
 
         # Populated at inference time via set_cat_sku_pools()
         self._cat_sku_pools = None
+        self.pool_temperature = 0.7
 
     # Shared input builder (forward + infer)
     def _build_input(
@@ -528,8 +529,17 @@ class SessionTransformer(nn.Module):
                 )
                 pool_tokens = self.item_head.sku_tokens[pool]           # [P, t]
                 # scores[p] = sum_k log p(pool_tokens[p, k] | ...)
-                scores = log_probs[m].gather(1, pool_tokens.T).sum(dim=0)  # [P]
-                pick_probs = F.softmax(scores, dim=-1)
+                # Test Test Test
+                # scores = log_probs[m].gather(1, pool_tokens.T).sum(dim=0)  # [P]
+                # pick_probs = F.softmax(scores, dim=-1)
+
+                scores = log_probs[m].gather(1, pool_tokens.T).sum(dim=0) / self.item_head.t
+                # pick_probs = F.softmax(scores, dim=-1)
+                pick_probs = F.softmax(scores / self.pool_temperature, dim=-1)
+
+
+                # End Test
+
                 item_result[m] = pool[int(torch.multinomial(pick_probs, 1).item())]
         return item_result
 
