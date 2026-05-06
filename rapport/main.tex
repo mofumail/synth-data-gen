@@ -215,11 +215,11 @@ Section~\ref{sec:conclusion} concludes.
 \label{sec:theory}
 
 \subsubsection{Interaction as Typed Temporal Event Sequences}
-Across the RS simulation papers reviewed for this thesis, ``interaction'' is
+Across the RS simulation papers reviewed for this work, ``interaction'' is
 more than a $\langle$user, item, rating$\rangle$ tuple. Accordion models
 events as
 % Mooie hbox
-$(time, user, item, outcome)$ with visit
+\textit{(time, user, item, outcome)} with visit
 dynamics~\cite{mcinerney2021accordion}. UserSim models sequential user
 behavior conditioned on prior interactions~\cite{zhao2021usersim}. SIREN and
 T-RECS model iterative, stateful user--item processes over
@@ -566,6 +566,7 @@ validated through reproducible runs across the five reported seeds.]
 
 %% =====================================================================
 \section{Methodology: Data}
+\label{sec:method-data}
 
 \subsection{Dataset Description}
 The experiments use the Synerise RecSys 2025 retail e-commerce dataset. The raw
@@ -664,7 +665,7 @@ item embedding rather than separate per-action vocabularies.
 \begin{figure}[t]
     \centering
     \includegraphics[width=\linewidth]{images/data/vocabulary_coverage.png}
-    \caption{Vocabulary analysis on the training split. Plot for ants, muuuuch bigger/make full width. Left: cumulative coverage
+    \caption{Vocabulary analysis on the training split. Left: cumulative coverage
     and UNK rate as a function of $K$ on a log scale, with the configured
     pipeline cap and 80\%/90\%/95\% reference points marked. Middle: float32
     embedding-table size in MB versus $K$ for embedding dimensions
@@ -1065,116 +1066,95 @@ produces the schema in Table~\ref{tab:schema}. Context features such as
 category and price are excluded from the output schema, but are included as input for the model.
 
 \subsection{System Architecture}
-[TODO]{This part should hold the architecture for each of the 3 iterations as well perhaps? Because SVDPQ and Cat -> Item are different, they should be mentioned here. Having the 3 iterations fits the methodology section as well.In each iteration, its only the system architecture/model design that changed, so it fits proeprly here. We should make mermaid diagrams for each of the 3 model architectures.
-This should also hold the C4 diagrams we made.}
-The simulator pipeline is:
-\begin{center}
-  arrival input $\rightarrow$ interaction generator $\rightarrow$
-  hard-constraint validation $\rightarrow$ output logging
-\end{center}
+\label{sec:system-arch}
 
-\paragraph{Multi-session user state.}
-This work adopts a session-based generation approach with cross-session user
-history context. Each session is generated as an independent sequence, but
-the generator conditions on the user's prior session history up to a window
-of $H$ events, capturing behavioral evolution across visits.
-
-\paragraph{Transformer backbone.}
-At each time step $t$, three prediction heads share the transformer hidden
-state $h_t$:
-\begin{itemize}[leftmargin=*]
-  \item $p(\text{action}_t \mid h_t)$: softmax over 6 classes, the 5 action
-    types plus an EOS token signaling session termination;
-  \item $p(\text{item}_t \mid \text{action}_t, h_t)$: softmax over the item
-    vocabulary, conditioned on the predicted action type;
-  \item $p(\delta_t \mid \text{action}_t, \text{item}_t, h_t)$: temporal
-    head, via discretized log-scale time bins.
-\end{itemize}
-
-Input representation at each sequence position is the sum of component
-embeddings:
-\[
-  \mathbf{x}_t = \mathbf{e}_{\text{item}} + \mathbf{e}_{\text{action}}
-  + \mathbf{e}_{\delta_t} + \mathbf{e}_{\text{pos}}
-\]
-
-Training uses teacher forcing with ground-truth event tuples at each
-position. The EOS token is the final target of every training session, so
-the model learns session termination from real boundaries. All three heads
-are trained jointly; the training loss is cross-entropy over action type
-(including EOS), cross-entropy over item, and cross-entropy over discretized
-time bins.
-
-\paragraph{Factored prediction.}
-A flat action--item composite vocabulary would be intractably large.
-Factored heads keep each softmax computationally tractable while preserving
-action--item joint modeling through the conditional head structure.
+The system is organized into four stages: \emph{ingestion},
+\emph{training}, \emph{generation}, and \emph{evaluation}. Each stage
+runs as an independent process, and stages communicate exclusively
+through durable artefacts on disk rather than through in-memory handoffs.
+This is the natural framing for a system description because it is also
+what makes the experimental ladder of Section~\ref{sec:method-eval}
+reproducible: any single stage can be re-run while the upstream artefacts
+are held fixed. Figure~\ref{fig:system-containers} gives the
+container-level view of the four stages and the artefacts that connect
+them; this subsection then walks through each stage in turn, deferring
+the model internals to Section~\ref{sec:model-arch} and the validity
+layer to Section~\ref{sec:validity}.
 
 \begin{figure*}[t]
 \centering
-\Description{System architecture diagram showing the transformer-based
-interaction generator pipeline, from arrival simulator input through
-embedding, transformer backbone, three factored prediction heads,
-hard-constraint validity layer, to output interaction log.}
-\begin{tikzpicture}[
-  node distance=5mm and 6mm,
-  box/.style={draw, rounded corners=4pt, minimum width=34mm,
-              minimum height=7mm, font=\small, align=center,
-              fill=white, draw=black!40},
-  head/.style={box, minimum width=30mm, minimum height=13mm},
-  io/.style={box, fill=black!6},
-  constraint/.style={box, minimum width=52mm, minimum height=13mm,
-                     fill=black!4},
-  arr/.style={-{Stealth[length=4pt]}, thick, draw=black!50},
-  darr/.style={arr, dashed, draw=black!30},
-]
-\node[io] (arrival) {Arrival simulator output};
-\node[box, below=of arrival] (embed)
-  {\textbf{Input embedding}\\[1pt]
-   \footnotesize$\mathbf{e}_\text{item}+\mathbf{e}_\text{action}
-   +\mathbf{e}_{\delta t}+\mathbf{e}_\text{pos}$};
-\node[box, below=of embed, minimum width=52mm, minimum height=16mm] (tfm)
-  {\textbf{Transformer backbone}\\[1pt]
-   \footnotesize Causal self-attention $\cdot$ $L$ layers\\
-   \footnotesize Cross-session history ($H$ events)\\
-   \footnotesize Hidden state $h_t$};
-\node[head, below left=10mm and 16mm of tfm] (ahead)
-  {\textbf{Action head}\\[1pt]
-   \footnotesize $p(\text{action}_t\mid h_t)$\\
-   \footnotesize 6 classes + EOS};
-\node[head, below=10mm of tfm] (ihead)
-  {\textbf{Item head}\\[1pt]
-   \footnotesize $p(\text{item}_t\mid\text{action}_t,h_t)$\\
-   \footnotesize top-$K$ vocab};
-\node[head, below right=10mm and 16mm of tfm] (thead)
-  {\textbf{Temporal head}\\[1pt]
-   \footnotesize $p(\delta_t\mid\text{action}_t,\text{item}_t,h_t)$\\
-   \footnotesize time bins};
-\node[constraint, below=20mm of ihead] (constraint)
-  {\textbf{Hard-constraint validity layer}\\[1pt]
-   \footnotesize Illegal transitions $\cdot$ $\delta_t$ monotonicity
-   $\cdot$ prior-exposure};
-\node[io, below=6mm of constraint] (output) {Output interaction log};
-\draw[arr] (arrival) -- (embed);
-\draw[arr] (embed)   -- (tfm);
-\draw[arr] (tfm.south) -- (ahead.north);
-\draw[arr] (tfm.south) -- (ihead.north);
-\draw[arr] (tfm.south) -- (thead.north);
-\draw[darr] (ahead.east)  -- node[above,font=\tiny]{cond.} (ihead.west);
-\draw[darr] (ihead.east)  -- node[above,font=\tiny]{cond.} (thead.west);
-\draw[arr] (ahead.south)  |- (constraint.west);
-\draw[arr] (ihead.south)  -- (constraint.north);
-\draw[arr] (thead.south)  |- (constraint.east);
-\draw[arr] (constraint) -- (output);
-\end{tikzpicture}
-\caption{System architecture. The transformer backbone produces a shared
-hidden state $h_t$ at each step, from which three factored heads jointly
-generate the action type, item, and inter-event time. Dashed arrows
-indicate conditioning: the item head conditions on the predicted action,
-and the temporal head conditions on both. All sessions pass through the
-hard-constraint validity layer before output.}
-\label{fig:architecture}
+\includegraphics[width=\linewidth]{images/model/system_containers.png}
+\caption{Container-level view of the system (C4 container diagram).
+Stages communicate through durable artefacts (edge labels) rather than
+in-memory handoffs, so any single stage can be re-run with its inputs
+held fixed. The model internals are detailed in
+Section~\ref{sec:model-arch}; the generation-time component view is
+given in Figure~\ref{fig:generation-runtime}
+(Appendix~\ref{sec:appendix-arch-diagrams}).}
+\label{fig:system-containers}
 \end{figure*}
+
+\paragraph{Stage 1 -- Ingestion.}
+The raw Synerise event stream is cleaned, time-aware split into train,
+validation, and test partitions, and reduced to a top-$K$ item vocabulary
+that maps the long catalog tail to a shared zero index. Offline, a second
+ingestion job constructs the SVD-PQ codebook used by the third model
+iteration: a truncated SVD of the weighted user--item interaction matrix
+followed by per-dimension quantile binning, producing one fixed-length
+token tuple per SKU. The full preprocessing pipeline, the rationale for
+$K$, and the empirical justifications for the split and the codebook
+threshold are detailed in Section~\ref{sec:method-data} and
+Section~\ref{sec:iter3-svdpq}.
+
+\paragraph{Stage 2 -- Training.}
+The dataset loader reads the cleaned parquet partitions and emits
+$(\text{prefix}, \text{target})$ pairs together with a cross-session
+memory window of the user's $H$ most recent prior events. The
+transformer is trained with teacher forcing and a summed cross-entropy
+loss over the three factored heads (action, item, inter-event time);
+the EOS class on the action head is the final target of every training
+session, so session termination is learned from real boundaries rather
+than imposed by a fixed cap. The output of the stage is a single model
+checkpoint. The head architecture itself, including the three iterations
+of the item head, is described in Section~\ref{sec:model-arch}; the
+search procedure and final hyperparameter values are in
+Section~\ref{sec:hparam}.
+
+\paragraph{Stage 3 -- Generation runtime.}
+The arrival simulator yields $(\texttt{user\_id}, \texttt{session\_id})$
+tuples that drive a session-based autoregressive generator. For each
+session, the trained checkpoint is unrolled step by step, with the input
+embedding summing the running session prefix and a cross-session memory
+window over the same user's prior sessions; at each step the three
+factored heads jointly produce an action, an item (suppressed for
+\texttt{search\_query} and \texttt{page\_visit}), and an inter-event
+time. The session terminates on EOS. Before the session is written to
+the output log it passes through the hard-constraint validity layer
+(Section~\ref{sec:validity}), which is reported both pre- and
+post-repair so that the cost of constraint enforcement is independently
+measurable. Figure~\ref{fig:generation-runtime} in
+Appendix~\ref{sec:appendix-arch-diagrams} shows the component-level
+view of this stage.
+
+\paragraph{Stage 4 -- Evaluation.}
+The evaluation stage consumes the generated session log and the real
+held-out parquet split as sibling inputs and produces the fidelity,
+validity, and downstream-utility (TSTR) metrics defined in
+Section~\ref{sec:method-eval}. Because the inputs to this stage are
+plain logs that share the schema of Table~\ref{tab:schema}, the same
+evaluation harness is used for the transformer generator and for the
+Markov baseline of Section~\ref{sec:portfolio}, which is the
+prerequisite for treating the comparison as a fair test of the
+architecture rather than of the surrounding pipeline.
+
+\paragraph{Interfaces and artefacts.}
+The artefacts that pin the system down are the cleaned and split
+parquets, the top-$K$ vocabulary file, the SVD-PQ codebook, the trained
+model checkpoint, and the generated session log (whose schema is
+Table~\ref{tab:schema}). Each artefact has a stable on-disk
+representation, so the four stages can be developed and re-run
+independently as long as the upstream artefact is fixed --- a property
+the experimental ladder of Section~\ref{sec:method-eval} relies on.
 
 \subsection{Model Architecture}
 \label{sec:model-arch}
@@ -1253,6 +1233,38 @@ matrix followed by per-dimension quantile binning
 bins. Items that interact with similar users land in nearby quantization
 cells, so semantically related SKUs share leading tokens.
 
+\paragraph{Event-type weighting.}
+Each $(\textit{user}, \textit{item})$ cell of the interaction matrix
+is the sum of per-event weights, where the weight assigned to an event
+depends only on its action type. The weights follow an
+inverse-frequency scheme: for each action type $a$ with corpus count
+$n_a$ in a corpus of $N$ events, the weight is $w_a = \log(N / n_a)$.
+Table~\ref{tab:svdpq-event-weights} reports the resulting values on the
+cleaned event corpus. The intent is to upweight rare but informative
+actions (purchases, cart events) over the abundant but noisy
+page-visit signal, so the SVD factors are dominated by events that
+actually express preference rather than by browse traffic.
+
+\begin{table}[h]
+\centering
+\caption{Per-action SVD-PQ event weights $w_a = \log(N / n_a)$
+computed on the cleaned event corpus ($N = 101{,}859{,}688$ events).
+Rare but informative actions receive higher weight.}
+\label{tab:svdpq-event-weights}
+\small
+\begin{tabular}{@{}l r r@{}}
+\toprule
+Action type $a$ & $n_a$ & $w_a$ \\
+\midrule
+\texttt{page\_visit}        & $79{,}222{,}116$ & $0.25$ \\
+\texttt{search\_query}      & $11{,}649{,}993$ & $2.17$ \\
+\texttt{add\_to\_cart}      &  $6{,}855{,}719$ & $2.70$ \\
+\texttt{remove\_from\_cart} &  $2{,}325{,}119$ & $3.78$ \\
+\texttt{product\_buy}       &  $1{,}806{,}741$ & $4.03$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 The item head (\texttt{SVDPQItemHead} in \texttt{heads.py}) is a single
 linear projection whose output is reshaped into $t$ parallel $v$-way logit
 vectors, and the training loss is the mean cross-entropy over those $t$
@@ -1311,6 +1323,7 @@ do have multi-user support.
 % ================================================= %
 
 \subsection{Hard-Constraint Validity Layer}
+\label{sec:validity}
 Generated sessions pass through explicit validity checks before output:
 \begin{enumerate}[leftmargin=*]
   \item \textbf{Illegal action transitions:} action bigrams not observed in
@@ -1325,6 +1338,7 @@ Both pre-constraint and post-constraint statistics are reported, making the
 cost of constraint repair independently measurable.
 
 \subsection{Comparison Portfolio}
+\label{sec:portfolio}
 Three conditions are evaluated:
 \begin{itemize}[leftmargin=*]
   \item \textbf{TRTR} (Train on Real, Test on Real): GRU4Rec trained on the
@@ -1343,6 +1357,7 @@ Three conditions are evaluated:
 \end{itemize}
 
 \subsection{Hyperparameter Tuning and Training Procedure}
+\label{sec:hparam}
 [TODO~--~final architecture configuration: number of layers $L$, hidden
 size, number of attention heads, history window $H$, item vocabulary
 size $K$, number of time bins, dropout, optimizer, learning rate schedule,
@@ -1374,7 +1389,8 @@ observed in early iterations rather than report a single distance. Each
 metric targets a separable property of the generated log; a generator can
 pass one and fail another, and the combination is what supports a
 fidelity claim. The full set is summarized in
-Table~\ref{tab:fidelity-metrics}.
+Table~\ref{tab:fidelity-metrics}
+(Appendix~\ref{sec:appendix-experimental}).
 
 Five distributional metrics compare the generated sessions against the
 real training distribution, two behavioral-rate metrics check funnel
@@ -1385,77 +1401,6 @@ size-matched random subsample of the real split (matched on session
 count to the synthetic batch); without this, item coverage and Gini are
 mechanically depressed for any synthetic batch smaller than the
 multi-million-session reference.
-
-\begin{table*}[t]
-\caption{Fidelity metric suite. Distributional metrics compare generated
-sessions to the training distribution; behavioral-rate metrics compare
-session-level event composition; bias metrics are informational and
-diagnose item-side collapse against a size-matched real subsample.
-Lower is better for all metrics except where indicated. All metrics are
-implemented in \texttt{evaluation/fidelity.py}.}
-\label{tab:fidelity-metrics}
-\small
-\begin{tabularx}{\textwidth}{@{}l l l X@{}}
-\toprule
-Group & Metric & Range & Description \\
-\midrule
-\multirow{5}{*}{Distributional}
-  & JSD(action distribution)
-    & $[0, 1]$
-    & Jensen--Shannon divergence between real and generated action-type
-      frequencies (5 event types). Marginal-level behavioral mix
-      \cite{lin1991jsd}. \\
-  & KS(session length)
-    & $[0, 1]$
-    & Two-sample Kolmogorov--Smirnov statistic on session length
-      distributions. Engagement-shape match. \\
-  & L1(action bigram matrix)
-    & $[0, 2]$
-    & L1 distance between normalized real and generated action bigram
-      transition matrices. Sequential structure of actions, not just
-      marginals. \\
-  & KS(temporal $\delta_t$)
-    & $[0, 1]$
-    & Two-sample KS on inter-event delta-time distributions in seconds.
-      Pacing realism. \\
-  & Sample diversity (Jaccard ratio)
-    & ratio, $1.0$ ideal
-    & Mean pairwise Jaccard distance over item sets in synthetic
-      sessions, normalized by the same statistic on real sessions.
-      Reported as a ratio so the sparse-catalog Jaccard floor cancels;
-      $<1$ means synthetic sessions are too repetitive across users,
-      $>1$ means too diffuse. \\
-\midrule
-\multirow{2}{*}{Behavioral rate}
-  & $\Delta$ conversion rate
-    & $[0, 1]$
-    & Absolute difference between the fraction of synthetic and real
-      sessions containing at least one \texttt{product\_buy}. Funnel
-      endpoint match. \\
-  & $\Delta$ cart abandonment rate
-    & $[0, 1]$
-    & Absolute difference between the fraction of sessions containing
-      \texttt{add\_to\_cart} but no \texttt{product\_buy}. Mid-funnel
-      drop-off. \\
-\midrule
-\multirow{3}{*}{Bias (informational)}
-  & Item coverage
-    & ratio, $1.0$ ideal
-    & Unique synthetic SKUs divided by unique SKUs in the size-matched
-      real subsample. Diagnoses head-only generation. \\
-  & Popularity JSD
-    & $[0, 1]$
-    & JSD between synthetic and matched-real per-SKU popularity
-      distributions over the union of SKU keys (no top-$K$
-      truncation). \\
-  & $\Delta$ Gini
-    & $[0, 1]$
-    & Absolute difference between the Gini coefficients of the
-      synthetic and matched-real SKU frequency distributions.
-      Concentration parity. \\
-\bottomrule
-\end{tabularx}
-\end{table*}
 
 The L1 distance on the item bigram transition matrix was considered and
 discarded after inspection: with a top-$K$-capped vocabulary of $\sim
@@ -1468,7 +1413,7 @@ Both generators are evaluated on the identical metric set, so the
 TSTR-T versus TSTR-M comparison is direct.
 
 \subsection{Validity Metrics}
-\label{sec:validity}
+\label{sec:validity-metrics}
 Generated sessions are checked against three hard behavioral constraints
 extracted from the training data
 (\texttt{evaluation/validity\_checker.py}):
@@ -1909,10 +1854,27 @@ Aleksandr V. Petrov and Craig Macdonald.
 \section{Model Architecture Diagrams}
 \label{sec:appendix-arch-diagrams}
 
-The three item-head variants from Section~\ref{sec:model-arch} share the
-same transformer backbone, action head, temporal head, and cross-session
-memory; they differ only in how the next SKU is predicted from the shared
-hidden state. The diagrams below show that branch for each iteration.
+This appendix collects the architecture diagrams that are referenced
+from Sections~\ref{sec:system-arch} and~\ref{sec:model-arch}.
+Figure~\ref{fig:generation-runtime} gives the component-level view of
+the generation runtime that hosts all three iterations. The remaining
+figures show the item-prediction branch for each iteration; all three
+share the same transformer backbone, action head, temporal head, and
+cross-session memory and differ only in how the next SKU is predicted
+from the shared hidden state.
+
+\begin{figure*}[t]
+\centering
+\includegraphics[width=\linewidth]{images/model/generation_runtime.png}
+\caption{Component view of the generation runtime (C4 component
+diagram). The arrival simulator drives the input embedding; the
+transformer backbone produces a shared hidden state; three factored
+heads sample an action, an item, and an inter-event time; the validity
+layer gates the output log. Per-iteration item-head variants are
+described in Section~\ref{sec:model-arch}; the validity layer is
+specified in Section~\ref{sec:validity}.}
+\label{fig:generation-runtime}
+\end{figure*}
 
 \begin{figure}[H]
 \centering
@@ -1999,6 +1961,83 @@ time.}
 \end{figure}
 
 \section{Additional Experimental Details}
+\label{sec:appendix-experimental}
+
+The fidelity metric suite referenced from
+Section~\ref{sec:fidelity} is reproduced in full in
+Table~\ref{tab:fidelity-metrics}.
+
+\begin{table*}[t]
+\caption{Fidelity metric suite. Distributional metrics compare generated
+sessions to the training distribution; behavioral-rate metrics compare
+session-level event composition; bias metrics are informational and
+diagnose item-side collapse against a size-matched real subsample.
+Lower is better for all metrics except where indicated. All metrics are
+implemented in \texttt{evaluation/fidelity.py}.}
+\label{tab:fidelity-metrics}
+\small
+\begin{tabularx}{\textwidth}{@{}l l l X@{}}
+\toprule
+Group & Metric & Range & Description \\
+\midrule
+\multirow{5}{*}{Distributional}
+  & JSD(action distribution)
+    & $[0, 1]$
+    & Jensen--Shannon divergence between real and generated action-type
+      frequencies (5 event types). Marginal-level behavioral mix
+      \cite{lin1991jsd}. \\
+  & KS(session length)
+    & $[0, 1]$
+    & Two-sample Kolmogorov--Smirnov statistic on session length
+      distributions. Engagement-shape match. \\
+  & L1(action bigram matrix)
+    & $[0, 2]$
+    & L1 distance between normalized real and generated action bigram
+      transition matrices. Sequential structure of actions, not just
+      marginals. \\
+  & KS(temporal $\delta_t$)
+    & $[0, 1]$
+    & Two-sample KS on inter-event delta-time distributions in seconds.
+      Pacing realism. \\
+  & Sample diversity (Jaccard ratio)
+    & ratio, $1.0$ ideal
+    & Mean pairwise Jaccard distance over item sets in synthetic
+      sessions, normalized by the same statistic on real sessions.
+      Reported as a ratio so the sparse-catalog Jaccard floor cancels;
+      $<1$ means synthetic sessions are too repetitive across users,
+      $>1$ means too diffuse. \\
+\midrule
+\multirow{2}{*}{Behavioral rate}
+  & $\Delta$ conversion rate
+    & $[0, 1]$
+    & Absolute difference between the fraction of synthetic and real
+      sessions containing at least one \texttt{product\_buy}. Funnel
+      endpoint match. \\
+  & $\Delta$ cart abandonment rate
+    & $[0, 1]$
+    & Absolute difference between the fraction of sessions containing
+      \texttt{add\_to\_cart} but no \texttt{product\_buy}. Mid-funnel
+      drop-off. \\
+\midrule
+\multirow{3}{*}{Bias (informational)}
+  & Item coverage
+    & ratio, $1.0$ ideal
+    & Unique synthetic SKUs divided by unique SKUs in the size-matched
+      real subsample. Diagnoses head-only generation. \\
+  & Popularity JSD
+    & $[0, 1]$
+    & JSD between synthetic and matched-real per-SKU popularity
+      distributions over the union of SKU keys (no top-$K$
+      truncation). \\
+  & $\Delta$ Gini
+    & $[0, 1]$
+    & Absolute difference between the Gini coefficients of the
+      synthetic and matched-real SKU frequency distributions.
+      Concentration parity. \\
+\bottomrule
+\end{tabularx}
+\end{table*}
+
 [TODO~--~full hyperparameter table, training curves, hardware utilization
 notes.]
 
