@@ -25,7 +25,8 @@ from tqdm import tqdm
 
 from config import (
     DS_START, HISTORY_WINDOW, VOCAB_K,
-    INFER_TEMPERATURE, INFER_ITEM_TEMPERATURE, SVDPQ_INFER_SCORER,
+    INFER_TEMPERATURE, INFER_ITEM_TEMPERATURE, INFER_POOL_TEMPERATURE,
+    SVDPQ_INFER_SCORER,
 )
 from simulation.validity import ValidityLayer
 from simulation.generator.session_transformer import SessionTransformer
@@ -55,6 +56,7 @@ class SessionGenerator:
         temperature: float = INFER_TEMPERATURE,
         item_temperature: float = INFER_ITEM_TEMPERATURE,
         svdpq_scorer: str = SVDPQ_INFER_SCORER,
+        pool_temperature: Optional[float] = INFER_POOL_TEMPERATURE,
     ):
         self.model_path            = str(model_path)
         self.validity_layer        = validity_layer
@@ -65,6 +67,7 @@ class SessionGenerator:
         self.temperature           = temperature
         self.item_temperature      = item_temperature
         self.svdpq_scorer          = svdpq_scorer
+        self.pool_temperature      = pool_temperature
         self._model                = None    # loaded lazily
         self._sampler              = None    # loaded lazily
         # Accumulates generated sessions per user across generate() calls.
@@ -151,6 +154,7 @@ class SessionGenerator:
             temperature=temp,
             item_temperature=item_temp,
             svdpq_scorer=self.svdpq_scorer,
+            pool_temperature=self.pool_temperature,
         )[0]
 
         if apply_constraints and events:
@@ -241,6 +245,7 @@ class SessionGenerator:
                 temperature=self.temperature,
                 item_temperature=self.item_temperature,
                 svdpq_scorer=self.svdpq_scorer,
+                pool_temperature=self.pool_temperature,
             )
             if apply_constraints:
                 results = [

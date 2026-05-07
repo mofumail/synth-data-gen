@@ -19,11 +19,11 @@ from sklearn.metrics import mutual_info_score
 from collections import Counter
 
 
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "DATA"
+DATA_DIR = Path(__file__).resolve().parent.parent / "DATA"
 PROPS_PATH = DATA_DIR / "product_properties.parquet"
 SEED = 42
-N_SAMPLE = None  # subsample for expensive pairwise ops
-N_CATEGORIES_SAMPLE = None  # categories to sample for intra/inter comparison
+N_SAMPLE = 200_000  # subsample for expensive pairwise ops
+N_CATEGORIES_SAMPLE = 500  # categories to sample for intra/inter comparison
 
 
 def parse_name_bytes(s: str) -> list[int]:
@@ -88,7 +88,8 @@ def test_intra_inter_similarity(name_arr: np.ndarray, categories: np.ndarray):
     # Pick categories with enough items
     cat_ids, cat_counts = np.unique(categories, return_counts=True)
     valid_cats = cat_ids[cat_counts >= 10]
-    sampled_cats = rng.choice(valid_cats, size=min(N_CATEGORIES_SAMPLE, len(valid_cats)), replace=False)
+    n_cat = len(valid_cats) if N_CATEGORIES_SAMPLE is None else min(N_CATEGORIES_SAMPLE, len(valid_cats))
+    sampled_cats = rng.choice(valid_cats, size=n_cat, replace=False)
 
     intra_sims = []
     inter_sims = []
@@ -142,7 +143,8 @@ def test_nn_category_agreement(name_arr: np.ndarray, categories: np.ndarray):
     print("If semantic, NN should share category more often than random chance.\n")
 
     rng = np.random.default_rng(SEED)
-    idx = rng.choice(len(name_arr), size=min(N_SAMPLE, len(name_arr)), replace=False)
+    n_sample = len(name_arr) if N_SAMPLE is None else min(N_SAMPLE, len(name_arr))
+    idx = rng.choice(len(name_arr), size=n_sample, replace=False)
     vecs = name_arr[idx]
     cats = categories[idx]
 
@@ -180,7 +182,8 @@ def test_mutual_information(name_arr: np.ndarray, categories: np.ndarray):
     print("High MI = byte position is predictive of category.\n")
 
     rng = np.random.default_rng(SEED)
-    idx = rng.choice(len(name_arr), size=min(N_SAMPLE, len(name_arr)), replace=False)
+    n_sample = len(name_arr) if N_SAMPLE is None else min(N_SAMPLE, len(name_arr))
+    idx = rng.choice(len(name_arr), size=n_sample, replace=False)
     cats = categories[idx]
 
     mis = []
@@ -203,7 +206,8 @@ def test_pca_variance(name_arr: np.ndarray):
     print("If random, variance should be ~uniform across components.\n")
 
     rng = np.random.default_rng(SEED)
-    idx = rng.choice(len(name_arr), size=min(N_SAMPLE, len(name_arr)), replace=False)
+    n_sample = len(name_arr) if N_SAMPLE is None else min(N_SAMPLE, len(name_arr))
+    idx = rng.choice(len(name_arr), size=n_sample, replace=False)
     vecs = name_arr[idx]
 
     # Center

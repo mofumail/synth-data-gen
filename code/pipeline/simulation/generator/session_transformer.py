@@ -88,6 +88,7 @@ class SessionTransformer(nn.Module):
         svdpq_t: int = 0,                              # tokens per item (0 = disabled)
         svdpq_v: int = 0,                              # bins per dim
         svdpq_label_smoothing: float = 0.0,            # per-dim CE smoothing ε (train-time only)
+        pool_temperature: float = 1.0,                 # SVD-PQ in-pool softmax temperature (eval-time)
     ):
         super().__init__()
         self.d_model      = d_model
@@ -167,7 +168,7 @@ class SessionTransformer(nn.Module):
 
         # Populated at inference time via set_cat_sku_pools()
         self._cat_sku_pools = None
-        self.pool_temperature = 0.7
+        self.pool_temperature = pool_temperature
 
     # Shared input builder (forward + infer)
     def _build_input(
@@ -268,6 +269,7 @@ class SessionTransformer(nn.Module):
         temperature: float = 1.0,
         item_temperature: float = 1.0,
         svdpq_scorer: str = "hamming",
+        pool_temperature: Optional[float] = None,
     ) -> List[List[dict]]:
         """
         Batched autoregressive inference.
@@ -289,6 +291,10 @@ class SessionTransformer(nn.Module):
         svdpq_scorer     : 'hamming' (sample t tokens, rank pool SKUs by match count)
                            or 'log_prob' (rank pool SKUs by factored log-likelihood).
                            Ignored when item_head is not SVDPQItemHead.
+        pool_temperature : softmax temperature applied when sampling the final
+                           in-pool SKU under SVD-PQ. None falls back to
+                           ``self.pool_temperature`` (set at construction /
+                           restored from the checkpoint config).
 
         Returns:
         List[List[dict]] - one event-dict list per input
@@ -296,6 +302,7 @@ class SessionTransformer(nn.Module):
         assert svdpq_scorer in ("hamming", "log_prob"), (
             f"svdpq_scorer must be 'hamming' or 'log_prob', got {svdpq_scorer!r}"
         )
+        pool_T = pool_temperature if pool_temperature is not None else self.pool_temperature
 
         self.eval()
         device  = next(self.parameters()).device
@@ -338,7 +345,7 @@ class SessionTransformer(nn.Module):
                 is_item    = torch.isin(a_idxs, item_action_ids) & ~done
 
                 i_idxs, c_full = self._sample_items(
-                    h_t, a_idxs, is_item, temperature, item_temperature, svdpq_scorer,
+                    h_t, a_idxs, is_item, temperature, item_temperature, svdpq_scorer, pool_T,
                 )
 
                 bin_idxs = self._sample_temporal(h_t, a_idxs, i_idxs, temperature)
@@ -438,6 +445,7 @@ class SessionTransformer(nn.Module):
         temperature: float,
         item_temperature: float,
         svdpq_scorer: str,
+        pool_temperature: float,
     ):
         """
         Category + item sampling at item-bearing rows.
@@ -471,6 +479,7 @@ class SessionTransformer(nn.Module):
         if isinstance(self.item_head, SVDPQItemHead):
             item_result = self._sample_svdpq_pool(
                 h_item, a_item, c_idxs, c_list, pools, item_temperature, svdpq_scorer,
+                pool_temperature,
             )
         else:
             item_result = self._sample_flat_pool(
@@ -490,6 +499,7 @@ class SessionTransformer(nn.Module):
         pools,
         item_temperature: float,
         scorer: str,
+        pool_temperature: float,
     ) -> torch.Tensor:
         """
         SVD-PQ pool scoring. Two scorers share the per-dim logits but differ in
@@ -535,7 +545,8 @@ class SessionTransformer(nn.Module):
 
                 scores = log_probs[m].gather(1, pool_tokens.T).sum(dim=0) / self.item_head.t
                 # pick_probs = F.softmax(scores, dim=-1)
-                pick_probs = F.softmax(scores / self.pool_temperature, dim=-1)
+                # pick_probs = F.softmax(scores / self.pool_temperature, dim=-1)
+                pick_probs = F.softmax(scores / pool_temperature, dim=-1)
 
 
                 # End Test
@@ -635,6 +646,7 @@ class SessionTransformer(nn.Module):
                 "svdpq_enabled":   self.svdpq_enabled,
                 "svdpq_t":         self.item_head.t if self.svdpq_enabled else 0,
                 "svdpq_v":         self.item_head.v if self.svdpq_enabled else 0,
+                "pool_temperature": self.pool_temperature,
             },
         }, path)
         print(f"  SessionTransformer saved -> {path}")
@@ -686,6 +698,7 @@ class SessionTransformer(nn.Module):
             sku_tokens_table  = sku_tokens_tbl,
             svdpq_t           = cfg.get("svdpq_t", 0),
             svdpq_v           = cfg.get("svdpq_v", 0),
+            pool_temperature  = cfg.get("pool_temperature", 1.0),
         )
 
         model._cat_sku_pools = None

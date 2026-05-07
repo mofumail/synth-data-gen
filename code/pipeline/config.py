@@ -132,6 +132,7 @@ FINAL_EVAL_SEEDS      = list(_cfg.get("final_eval_seeds", [42, 43, 44]))
 #Inference sampling
 INFER_TEMPERATURE      = _cfg["infer_temperature"]
 INFER_ITEM_TEMPERATURE = _cfg["infer_item_temperature"]
+INFER_POOL_TEMPERATURE = float(_cfg.get("infer_pool_temperature", 1.0))
 SVDPQ_INFER_SCORER     = _cfg.get("svdpq_infer_scorer", "hamming")
 if SVDPQ_INFER_SCORER not in ("hamming", "log_prob"):
     raise ValueError(
