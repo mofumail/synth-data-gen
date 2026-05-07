@@ -43,7 +43,7 @@
 %% Finalized title should reflect results once experiments are complete.
 %% [TODO] Consider adapting if your strongest finding shifts the framing.
 \title{Constraint-Aware Interaction Generator for Synthetic E-commerce data}
-\subtitle{Subtitle}
+\subtitle{An End-to-End pipeline for training and evaluating interaction generators.}
 
 %%
 %% AUTHOR INFORMATION
@@ -55,15 +55,33 @@
   \country{The Netherlands}
 }
 
-\renewcommand{\shortauthors}{Min and Dey}
+\renewcommand{\shortauthors}{Min}
 
 %%
 %% STRUCTURED ABSTRACT
 %% [TODO] Replace placeholder Results and Conclusion sentences with your
 %%        final numbers and findings once experiments are complete.
 \begin{abstract}
-Write this later
-
+Recommender-system simulators rely on synthetic interaction logs whose
+fidelity, validity, and downstream utility determine whether
+simulation-based studies remain credible. Existing simulators in the
+RS-simulation literature are dominated by process-based, agent-based,
+statistical, and adversarial approaches, while transformer sequence
+modeling has been applied almost exclusively to next-item prediction
+rather than full-session generation. This approach bridges the two lines
+with a multi-head autoregressive transformer that emits typed
+interaction tuples (action type, item, inter-event time) jointly,
+embedded in a process-based simulation wrapper and trained on the
+Synerise RecSys~2025 retail dataset. Three iterations of the item head
+(flat $K$-way softmax, category-hierarchical, and SVD-PQ
+token-factored) target the popularity-collapse failure mode of the
+flat baseline at successively stronger structural priors, and a
+hard-constraint validity layer reports pre- and post-repair violation
+rates for three behavioral constraints to keep generation assumptions
+auditable. Quality is measured under a multi-axis protocol covering
+distributional fidelity, behavioral validity, and downstream utility
+(TSTR HR@10 / NDCG@10) against a Markov-style baseline, with five-seed
+variance reporting. TODO: Results & Conclusion & Reflection.
 \end{abstract}
 
 %% CCS CONCEPTS -- replace with concepts from https://dl.acm.org/ccs/ccs.cfm
@@ -192,9 +210,6 @@ The main contributions of this work are:
   \item A multi-head autoregressive transformer architecture for typed event
     tuple generation, with factored heads for action type, item, and
     inter-event time.
-  \item An explicit hard-constraint validity layer that makes generation
-    assumptions auditable and enables pre/post-constraint reporting of
-    repair cost.
   \item A reproducible, multi-axis evaluation protocol covering fidelity,
     validity, and downstream utility, with variance reporting across seeds.
 \end{enumerate}
@@ -262,10 +277,7 @@ is insufficient: synthetic data that enables good downstream models may still
 be statistically implausible at the distributional level. Figueira and
 Vaz~\cite{figueira2022survey} reinforce that single-metric evaluation is
 systematically incomplete. Stavinova et al.~\cite{stavinova2022survey}
-document heterogeneous and non-comparable metrics across simulators. Taken
-together, these findings make a case for evaluating fidelity, validity, and
-utility jointly.
-
+document heterogeneous and non-comparable metrics across simulators.
 \subsubsection{Reproducibility and Assumption Explicitness}
 T-RECS emphasizes multi-run confidence intervals and repeated-run variance
 analysis as scientific requirements for simulation
@@ -357,6 +369,19 @@ output. Colleagues working on related projects stand to benefit from a
 reusable simulator component and a documented evaluation protocol they can
 apply or extend without having to rebuild from scratch.
 
+\paragraph{CMI researchers (operator end-user).}
+The immediate end-user of the deliverable is a CMI researcher who runs the
+simulator: configures a generation experiment, executes the pipeline, and
+inspects the resulting metrics. Their stake is operational rather than
+methodological. They benefit from a configuration-driven entry point, a
+deterministic re-run path on a fixed seed, and metrics output that does not
+require code changes to interpret. Decisions made for this end-user
+include the configuration-file-driven experiment runner, the four-stage
+artefact-based pipeline (so any single stage can be re-run without
+re-running its predecessors), and a single shared evaluation harness for
+both generators so cross-generator comparisons require no per-experiment
+glue code.
+
 \paragraph{Recommender systems research community.}
 The research community's interest is in reusable evaluation protocols,
 open-dataset compatibility, and reproducible baselines that support
@@ -395,6 +420,22 @@ reproduce whatever popularity skew is present in the training data. This
 tension is resolved by including explicit bias metrics in the fidelity
 evaluation rather than treating fidelity-to-data and fairness-to-users as
 equivalent goals.
+
+\subsection{Current Situation}
+\label{sec:current-situation}
+The interaction generator currently in use within the CMI simulator is a
+patchwork of three independent mechanisms rather than a single learned
+sequence model: a recommender selects items, a first-order Markov chain
+selects action transitions, and hardcoded session logic glues the two
+together (Section~\ref{sec:introduction}). The result, as documented in
+the same section, is implausible session structures and insufficient
+distributional coverage across the item space. The proposed transformer
+generator described in Section~\ref{sec:method-model} replaces all
+three mechanisms with one autoregressive model whose factored heads
+emit action, item, and inter-event time jointly, and whose
+distributional and behavioral fidelity is evaluated against the
+existing Markov-style mechanism using the protocol of
+Section~\ref{sec:method-eval}.
 
 \subsection{AI Considerations}
 \label{sec:ai-considerations}
@@ -452,11 +493,11 @@ reported to make the problem visible and quantifiable, enabling downstream
 researchers and practitioners to make informed decisions about whether and
 how to deploy synthetic data produced by this pipeline.
 
-The research is nonetheless justified. The alternative, continued reliance
-on static historical logs for recommender evaluation, carries its own
-unacknowledged biases and feedback dynamics. A transparent, auditable
-synthetic generator with documented bias characteristics is a more
-controllable research instrument than an unexamined historical log.
+%The research is nonetheless justified. The alternative, continued reliance
+%on static historical logs for recommender evaluation, carries its own
+%unacknowledged biases and feedback dynamics. A transparent, auditable
+%synthetic generator with documented bias characteristics is a more
+%controllable research instrument than an unexamined historical log.
 
 %% =====================================================================
 \section{Methodology: Research Design}
@@ -467,15 +508,22 @@ The project follows a design-and-evaluate methodology across three phases:
 specification, modeling, and evaluation. The specification phase formalizes
 the interaction schema, simulator interfaces, and evaluation protocol. The
 modeling phase implements the Markov baseline and transformer generator.
-The evaluation phase runs the fidelity--validity--utility protocol with
+The evaluation phase runs the fidelity–validity–utility protocol with
 statistical reporting.
 
 \subsection{Experimental Setup}
-[TODO~--~final hardware (GPU model and memory), framework versions
-(PyTorch x.y, Transformers x.y, NumPy, etc.), CUDA version, OS, container
-runtime, and the seed values used. Note any deviations from the planned
-deterministic preprocessing.]
-Training and evaluation runs were done on an RTX 4070 TI with 12GB of VRAM available on CUDA version 13.2, running on CachyOS. Seed values used are 42, with additional seeds being used by incrementing (42...46).
+All training and evaluation runs are executed on a single workstation
+with one NVIDIA GeForce RTX 4070~Ti GPU (12\,GB VRAM, driver
+$595.71.05$), running CachyOS Linux (kernel $7.0.3$) with CUDA $13.2$. Python dependencies are pinned in
+\texttt{uv.lock} and resolved by the \texttt{uv} package manager; the
+versions relevant to the experiments are PyTorch~$2.11.0$, NumPy~$2.4.4$,
+Polars~$1.39.3$, and pandas~$3.0.2$.
+
+Multi-seed reporting uses five consecutive integer seeds starting at
+$42$, i.e.\ $\{42, 43, 44, 45, 46\}$. The same seed set is reused for
+final evaluation (\texttt{final\_eval\_seeds} in the configuration). Preprocessing, cleaning, sessionization, and split steps depend only on the input parquets and
+the configured cutoffs, and produce byte-stable
+output artefacts.
 
 
 %% =====================================================================
@@ -489,7 +537,7 @@ behavioral event logs with no personally identifiable information (PII).
 Processing anonymized behavioral data for academic research is permissible
 under the scientific research exemption of the EU General Data Protection
 Regulation (GDPR, Art.~89)~\cite{gdpr2016}. Generated synthetic data carries
-no re-identification risk: item-ID vocabulary capping reduces the item space
+minor re-identification risk: item-ID vocabulary capping reduces the item space
 to a top-$K$ vocabulary, and all outputs are population-level statistics
 rather than individual records.
 
@@ -506,13 +554,12 @@ inherited skew transparent.
 
 The generation pipeline must not be used for individual-level profiling or
 decisions. Use is restricted to aggregate training data generation. The
-explicit hard-constraint layer documents and enforces generation assumptions,
-making the automation auditable.
+explicit hard-constraint layer documents and enforces generation assumptions.
 
 \subsection{Organizational Requirements}
 The project is conducted by a single developer within the thesis timeline.
 The deliverable is an academic thesis document and a demonstrator pipeline.
-Weekly supervision meetings with Diptish Dey provide structured checkpoints.
+Weekly supervision meetings with supervisor Diptish Dey provide structured checkpoints.
 
 \subsection{Functional Requirements}
 The generator must produce typed event tuples conforming to the schema in
@@ -527,42 +574,103 @@ pass through the validity layer before output.
 
 \subsection{Technical Requirements}
 The model must be trainable on a single GPU within the timeline. Vocabulary
-capping ensures softmax tractability by limiting the item space to the
+capping ensures softmax tractability and prevents Out-Of-Memory errors by limiting the item space to the
 top-$K$ most frequent items. Evaluation infrastructure must be deterministic:
 fixed random seeds, configuration-driven experiment runs, and all
 hyperparameters logged.
 
 The evaluation pipeline must support reproducible execution across multiple
 random seeds. The generator must be deployable within the containerized
-simulation environment alongside the arrival simulator. Generation
-throughput must be sufficient to avoid becoming a bottleneck relative to
-the arrival simulator's output rate. Throughput is reported as a diagnostic
-metric.
+simulation environment alongside the arrival simulator.
 
-The evaluation protocol imposes the following measurement constraints.
-Fidelity is assessed via four metrics: Jensen--Shannon divergence over the
-action-type distribution (JSD), the two-sample Kolmogorov--Smirnov statistic
-over session length distributions (KS), L1 distance over the action bigram
-transition matrix, and L1 distance over the item bigram transition matrix
-restricted to item-bearing events (\texttt{product\_buy},
-\texttt{add\_to\_cart}, \texttt{remove\_from\_cart}). Validity is assessed
-via three constraint violation rates: illegal action transition rate,
-timestamp monotonicity violation rate, and purchase-without-prior-exposure
-rate. Both pre- and post-constraint-layer rates must be reported. Downstream
-utility is assessed via HR@10 and NDCG@10 under the TSTR paradigm. All
-metrics must be reported as mean and standard deviation across five random
-seeds. The transformer generator (TSTR-T) must outperform the Markov
-baseline (TSTR-M) on both HR@10 and NDCG@10 for the utility claim to be
-considered confirmed. Improvement on one metric only is treated as
-inconclusive.
+%The evaluation protocol imposes the following measurement constraints.
+%Fidelity is assessed via four metrics: Jensen--Shannon divergence over the
+%action-type distribution (JSD), the two-sample Kolmogorov--Smirnov statistic
+%over session length distributions (KS), L1 distance over the action bigram
+%transition matrix, and L1 distance over the item bigram transition matrix
+%restricted to item-bearing events (\texttt{product\_buy},
+%\texttt{add\_to\_cart}, \texttt{remove\_from\_cart}). Validity is assessed
+%via three constraint violation rates: illegal action transition rate,
+%timestamp monotonicity violation rate, and purchase-without-prior-exposure
+%rate. Both pre- and post-constraint-layer rates must be reported. Downstream
+%utility is assessed via HR@10 and NDCG@10 under the TSTR paradigm. All
+%metrics must be reported as mean and standard deviation across five random
+%eeds. The transformer generator (TSTR-T) must outperform the Markov
+%baseline (TSTR-M) on both HR@10 and NDCG@10 for the utility claim to be
+%considered confirmed. Improvement on one metric only is treated as
+%inconclusive.
 
 \subsection{Validation of Requirements}
-[TODO~--~for each requirement category above, summarize how it was validated
-during the project. Examples: legal/ethical requirements were validated
-through documented adherence to GDPR Art.~89 and the absence of PII fields
-in the processed schema; functional requirements were validated through
-schema conformance tests in the demonstrator; technical requirements were
-validated through reproducible runs across the five reported seeds.]
+\label{sec:requirements-validation}
+The five categories of requirements above were validated as follows.
+
+\paragraph{Legal.}
+The Synerise RecSys~2025 dataset is distributed under the MIT licence
+attached to the public release repository, which permits use, modification,
+and redistribution subject only to inclusion of the copyright notice and
+disclaimer. No separate data-use agreement is associated with the release.
+The pipeline therefore complies with the legal basis named in
+Section~\ref{sec:method-requirements} by (i) operating only on the
+publicly released parquets, (ii) processing no PII fields
+(\texttt{client\_id} and \texttt{sku} are opaque integers, see
+Section~\ref{sec:method-data}), and (iii) restricting all reported
+outputs to population-level aggregates so that no individual-level
+record produced by the pipeline is published.
+
+\paragraph{Ethical.}
+The ethical requirement to make bias inheritance visible rather than
+silent was validated by (i) computing the bias-metric group (item
+coverage, popularity JSD, $\Delta$Gini) on every generated batch as
+part of the standard fidelity evaluation and (ii) using these metrics
+as a development signal during model iteration. Two
+hyperparameters were added to the pipeline in direct response to bias
+readings: an inverse-frequency item-CE weight
+(\texttt{item\_loss\_freq\_weight\_alpha}) and a Menon-style category
+logit adjustment (\texttt{cat\_logit\_adj\_tau}) \cite{menon2021longtaillearninglogitadjustment}.% Both are off by
+%default and were introduced when popularity-JSD and Gini-delta
+%diagnostics indicated head-only collapse on a candidate iteration.
+%Bias reporting therefore did not remain a passive disclosure; it
+%shaped the design of the model itself.
+
+\paragraph{Organizational.}
+The timeline constraint was validated by
+delivery against the project planning held on the supervision team's
+shared planning board, with weekly check-ins with supervisor Diptish Dey throughout
+the project. %Personal notes were kept for the more substantive meetings
+%(timestamped by their last-edit metadata); no formal minutes were
+%produced because not every meeting carried decisions worth minuting.
+
+\paragraph{Functional.}
+The functional requirements decompose into a behavioral contract and a
+schema contract. The behavioral contract, legal action transitions,
+timestamp monotonicity, and purchase-without-prior-exposure, is
+validated automatically at generation time by the constraint
+validity layer (\texttt{evaluation/validity\_checker.py},
+Section~\ref{sec:validity}); both pre- and post-repair violation rates
+are reported in Section~\ref{sec:validity-metrics}, which makes the
+constraint check measurable.
+%The schema
+%contract from Table~\ref{tab:schema} is currently validated only
+%implicitly: downstream stages crash on a schema mismatch, but no
+%explicit schema assertion is wired in. A small \texttt{assert}-level
+%schema check on the generator's output parquet is identified as a
+%follow-up [TODO~--~add explicit schema assertions or a pydantic /
+%\texttt{polars.Schema} check on the generation log].
+
+\paragraph{Technical.}
+The technical requirements were validated by direct measurement on the
+hardware described in Section~\ref{sec:method-design}. GPU memory stayed
+below $4$\,GB during training and below $6$\,GB during evaluation on the
+$12$\,GB RTX~4070~Ti, so the single-GPU training requirement is met with headroom. Determinism is validated by
+re-running the preprocessing pipeline against the same input parquets
+and observing byte-stable output artefacts across runs; multi-seed
+reproducibility is validated by the five-seed evaluation protocol
+(Section~\ref{sec:tstr}).
+%The deployability-alongside-the-arrival-simulator
+%requirement is met by reading the arrival simulator's output as the
+%generator's input contract; an explicit end-to-end throughput
+%measurement against the arrival simulator was not performed and is
+%identified as future work.
 
 %% =====================================================================
 \section{Methodology: Data}
@@ -578,7 +686,7 @@ table. The interaction schema comprises five event types: \texttt{page\_visit},
 event parquet files and one \texttt{product\_properties} parquet file, rather
 than six event files.
 
-The raw action distribution is highly imbalanced toward browsing activity, as
+The raw action distribution is imbalanced toward browsing activity, as
 shown in Table~\ref{tab:raw-action-distribution}. Page visits account for
 $88.56\%$ of all logged events, while purchases account for only $1.03\%$. This
 asymmetry is important for both modeling and evaluation: the generator must
@@ -587,8 +695,7 @@ browsing events dominate the event stream. The temporal structure of this stream
 is shown in Figure~\ref{fig:weekly-event-volume}, where weekly event volume per
 type is plotted together with the train/validation/test split boundaries used by
 the pipeline. Event volume rises substantially over the observation window, and
-the held-out periods overlap with the densest portion of the corpus -- so the
-held-out splits are not simply tail fragments of a stationary distribution.
+the held-out periods overlap with the densest portion of the corpus.
 
 \begin{table}[t]
     \centering
@@ -624,7 +731,7 @@ The product metadata table contains $1{,}534{,}050$ rows with four fields:
 values are present in these columns. The catalog contains $6{,}912$ distinct
 categories and 100~price buckets, and metadata coverage for training SKUs is
 complete. This makes the dataset suitable for feature-augmented sequence
-modeling and for extracting item--category constraint structure from the
+modeling and for extracting item-category constraint structure from the
 training split.
 
 The item distribution is strongly long-tailed. Under the realized training split
@@ -634,14 +741,17 @@ needed to cover a target fraction of training item-bearing events, and
 Figure~\ref{fig:vocabulary-coverage} visualizes the same coverage curve along
 with the embedding-table memory cost as $K$ grows and the long-tail bucket
 breakdown. Three orders of magnitude separate the $K$ required for $50\%$
-coverage from the $K$ required for $99\%$ coverage. This Zipf-like behavior
-makes the choice of item vocabulary size a central design decision rather than
-an implementation detail. The same long-tail structure recurs per action type:
+coverage from the $K$ required for $99\%$ coverage.
+%This Zipf-like behavior
+%makes the choice of item vocabulary size a central design decision rather than
+%an implementation detail.
+The long-tail structure recurs per action type:
 Figure~\ref{fig:sku-action-loglog} shows that \texttt{add\_to\_cart},
 \texttt{remove\_from\_cart}, and \texttt{product\_buy} all follow the same
 approximate power-law shape over their respective SKU ranks, with strongly
-correlated frequencies across action types -- which justifies a single shared
-item embedding rather than separate per-action vocabularies.
+correlated frequencies across action types.
+%-- which justifies a single shared
+%item embedding rather than separate per-action vocabularies.
 
 \begin{table}[t]
     \centering
@@ -693,8 +803,7 @@ $32.8\%$ search-only sessions, $45.2\%$ sessions that reach the cart but not
 checkout, and $19.9\%$ purchase sessions. Figure~\ref{fig:session-taxonomy}
 visualizes this distribution alongside the implied session-level conversion
 funnel ($100\% \rightarrow 98.0\% \rightarrow 65.2\% \rightarrow 19.9\%$), and
-$26.2\%$ of training users complete at least one purchase. This is the
-behavioral funnel a credible session generator must reproduce.
+$26.2\%$ of training users complete at least one purchase.
 
 \begin{figure}[t]
 \centering
@@ -707,18 +816,18 @@ dominant browse/search/cart modes.}
 \label{fig:session-taxonomy}
 \end{figure}
 
-The dataset is well-suited to evaluating constraint-aware interaction generation
-because it contains not only a temporally ordered event stream, but also a
+The dataset is well-suited for evaluating interaction generation
+because it contains temporally ordered event stream, as well as a
 domain-specific behavioral funnel spanning browsing, search, cart management,
-and purchase. At the same time, the constraints extracted in this thesis are
+and purchase. All the while, the constraints extracted in this thesis are
 retail-specific. The resulting legality rules, exposure prerequisites, and
-validity checks should therefore be understood as conventions of e-commerce
+validity checks are therefore  conventions of e-commerce
 interaction data, not as domain-agnostic behavioral rules that would
 automatically transfer to settings such as media, news, or social feeds.
 
 \subsection{Preprocessing Pipeline}
 The preprocessing pipeline is implemented in \texttt{preprocess.py} and
-\texttt{ingestion/dataset.py} and consists of six main stages.
+\texttt{ingestion/dataset.py} , and it consists of six main stages.
 
 \begin{enumerate}
     \item \textbf{Schema normalization.}
@@ -726,7 +835,7 @@ The preprocessing pipeline is implemented in \texttt{preprocess.py} and
     with a shared schema over \texttt{client\_id}, \texttt{timestamp},
     \texttt{event\_type}, and \texttt{sku}. Product metadata is then joined onto
     item-bearing events, adding category and price information from
-    \texttt{product\_properties}. This yields a consistent event stream for both
+    \texttt{product\_properties}. This provides a consistent event stream for both
     session construction and downstream feature extraction.
 
     \item \textbf{Deduplication and timestamp cleanup.}
@@ -737,35 +846,50 @@ The preprocessing pipeline is implemented in \texttt{preprocess.py} and
     $161{,}673$ exact duplicates from \texttt{add\_to\_cart}, $153{,}675$ from
     \texttt{remove\_from\_cart}, and $380{,}923$ from \texttt{product\_buy}.
     Timestamps are also checked against the dataset bounds (23~June~2022 to
-    8~December~2022); no out-of-range timestamps remain after cleanup.
+    8~December~2022).
 
     \item \textbf{Sessionization.}
     User timelines are segmented with a 30-minute inactivity threshold. This
-    choice was verified empirically against the observed gap distribution rather
-    than adopted purely by convention. Figure~\ref{fig:inter-event-gaps} shows
+    choice was decideed against the observed gap distribution. Figure~\ref{fig:inter-event-gaps} shows
     the distribution of all within-user inter-event gaps in the
-    post-preprocessing corpus, along with the CDF zoomed into the 0--60-minute
+    post-preprocessing corpus, along with the CDF zoomed into the 0-60-minute
     window where any reasonable sessionization threshold must sit. The CDF is
-    essentially flat in the 20--45-minute range, so the threshold's exact value
+    essentially flat in the 20 to 45-minute range, so the threshold's exact value
     has only a minor effect on the fraction of gaps it cuts.
-    Table~\ref{tab:sessionization-sensitivity} quantifies this: varying the
+    Table~\ref{tab:sessionization-sensitivity} quantifies this, varying the
     threshold across $\{20, 30, 45\}$ minutes changes the number of sessions by
     less than $5.5\%$ while preserving median and tail percentiles.
     Figure~\ref{fig:sessionisation-sensitivity} shows the same sensitivity
     analysis visually, together with the session-length CDF and the bucketed
     length distribution under the chosen 30-minute threshold. Sessions containing
     only \texttt{page\_visit} events are removed afterward because they provide
-    no item signal; zero such sessions remain in the final preprocessed corpus.
+    no item signal and zero of such sessions remain in the final preprocessed corpus.
 
     \item \textbf{Time-aware split by session start.}
-    To avoid temporal leakage, train/validation/test assignment is determined by
-    session start time rather than individual event time. Sessions starting before
-    15~November~2022 are assigned to training, sessions starting from 15~November
-    to 1~December~2022 to validation, and sessions starting on or after
-    1~December~2022 to test. The realized split sizes are reported in
-    Table~\ref{tab:preprocessed-splits}. This creates held-out periods that
-    include behaviorally distinct late-season traffic while preserving temporal
-    ordering.
+    Train/validation/test assignment is determined by session start time
+    rather than individual event time, and rather than by user or by
+    random shuffle. The session-start choice avoids in-session leakage:
+    a per-event time split would place events of the same session on
+    both sides of the boundary, leaking the session-prefix signal that
+    the generator is supposed to learn. The time-based choice is
+    preferred over a user-based or random split because the deployment
+    regime of the simulator is forward-in-time, the generator is
+    expected to produce sessions for the period after the training
+    window, not for held-out users sampled uniformly from the same
+    period, and because a random event-level shuffle would leak both
+    temporal and intra-session structure simultaneously. Sessions
+    starting before 15~November~2022 are assigned to training, sessions
+    starting from 15~November to 1~December~2022 to validation, and
+    sessions starting on or after 1~December~2022 to test. The cutoffs
+    partition the 168-day observation window into roughly $145/16/8$
+    days and place the densest, behaviorally distinct
+    late-season traffic (the Black Friday and early holiday-shopping
+    period) on the held-out side, so the validation and test splits
+    function as a forward-in-time test. The split itself is deterministic given
+    the configured cutoffs and involves no randomness, so it
+    contributes nothing to the seed-to-seed variance reported in
+    Section~\ref{sec:eval-setup}. The realized split sizes are reported
+    in Table~\ref{tab:preprocessed-splits}.
 
     \item \textbf{Vocabulary capping.}
     The item vocabulary is truncated to the most frequent SKUs in the training
@@ -773,12 +897,14 @@ The preprocessing pipeline is implemented in \texttt{preprocess.py} and
     $199{,}999$ explicit SKU entries plus a shared zero index used for padding,
     non-item events, and out-of-vocabulary items. Under the realized
     session-start training split, this vocabulary covers $71.71\%$ of training
-    item-bearing events, implying a training OOV rate of $28.29\%$. Reaching
+    item-bearing events, a training OOV rate of $28.29\%$. Reaching
     $90\%$ coverage would require $654{,}304$ explicit SKUs and $95\%$ would
     require $887{,}771$ (see Table~\ref{tab:vocab-coverage-K} and
-    Figure~\ref{fig:vocabulary-coverage}). The chosen cap therefore reflects a
-    deliberate trade-off between coverage and model tractability, not an
-    approximation that leaves only a negligible residual UNK rate. Relative to
+    Figure~\ref{fig:vocabulary-coverage}).
+    %The chosen cap therefore reflects a
+    %deliberate trade-off between coverage and model tractability, not an
+    %approximation that leaves only a negligible residual UNK rate.
+    Relative to
     the train top-$K$ vocabulary, exact event-level OOV rises substantially on
     the held-out splits, as reported in Table~\ref{tab:oov-by-split},
     illustrating strong temporal item drift.
@@ -799,22 +925,17 @@ The preprocessing pipeline is implemented in \texttt{preprocess.py} and
     \texttt{product\_buy} $\rightarrow$ \texttt{remove\_from\_cart}
     ($p{=}0.0045$).
 
-
-
-    All 25~action bigrams are observed at least once,
-    but several are extremely rare; for example, \texttt{search\_query} $\rightarrow$
-    \texttt{product\_buy} occurs with probability $0.0007$, and
-    \texttt{product\_buy} $\rightarrow$ \texttt{remove\_from\_cart} with
-    probability $0.0045$. Exposure analysis is summarized in
-    Figure~\ref{fig:exposure-prerequisite}: only $53.32\%$ of purchases have a
-    prior same-session same-SKU \texttt{add\_to\_cart}, and even when widening to
-    any prior same-client same-SKU \texttt{add\_to\_cart} the share rises only to
-    $63.55\%$. Equivalently, $36.45\%$ of valid purchases have no prior same-SKU
-    cart event at all. Likewise, $45.9\%$ of \texttt{remove\_from\_cart} events
-    in training have no prior same-session same-SKU \texttt{add\_to\_cart}.
-    These findings argue against overly rigid hard prerequisites and motivate a
-    combination of hard legality checks and softer behavioral constraints in the
-    generation pipeline.
+    Exposure analysis is summarized in
+    Figure~\ref{fig:exposure-prerequisite}
+    %: only $53.32\%$ of purchases have a
+    %prior same-session same-SKU \texttt{add\_to\_cart}, and even when widening to
+    %ny prior same-client same-SKU \texttt{add\_to\_cart} the share rises only to
+    %$63.55\%$. Equivalently, $36.45\%$ of valid purchases have no prior same-SKU
+    %cart event at all. Likewise, $45.9\%$ of \texttt{remove\_from\_cart} events
+    %in training have no prior same-session same-SKU \texttt{add\_to\_cart}.
+    %%These findings argue against overly rigid hard prerequisites and motivate a
+    %ombination of hard legality checks and softer behavioral constraints in the
+    %generation pipeline.
 
 
 
@@ -917,23 +1038,22 @@ treated as soft rather than hard constraints in the generation pipeline.}
     \label{fig:exposure-prerequisite}
 \end{figure}
 
-Finally, the held-out splits are not merely smaller temporal continuations of
-the training period; they are meaningfully harder.
+Finally, the held-out splits are meaningfully harder.
 Figure~\ref{fig:split-integrity} summarizes this on two axes. The left panel
 shows event counts per split per action type, confirming that the action mix is
-preserved across splits; the right panel shows the user-overlap analysis. Only
-$35.1\%$ of validation users and $34.5\%$ of test users also appear in the
-training split, so roughly two-thirds of users in either held-out split are
-cold-start with respect to user history. Together with the item-level OOV rates
-in Table~\ref{tab:oov-by-split}, this makes the validation and test periods
-informative stress tests for both memorization and generalization.
+preserved across splits; the right panel shows the user-overlap analysis.
+%Only
+%$35.1\%$ of validation users and $34.5\%$ of test users also appear in the
+%training split, so roughly two-thirds of users in either held-out split are
+%cold-start with respect to user history. Together with the item-level OOV rates
+%in Table~\ref{tab:oov-by-split}, this makes the validation and test periods
+%informative stress tests for both memorization and generalization.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=\linewidth]{images/data/split_integrity.png}
 \caption{Data split integrity under the session-start split. Left: stacked
-event counts per split, broken down by action type; the action mix is
-preserved across splits. Right: user overlap with the training split. Roughly
+event counts per split, broken down by action type. Right: user overlap with the training split. Roughly
 two-thirds of validation and test users have no training history and are
 cold-start.}
 \label{fig:split-integrity}
@@ -957,7 +1077,7 @@ remaining $28.3\%$ of events are mapped to the shared zero index together with
 padding and non-item events. Reaching $90\%$ training coverage would require
 $\sim\!650$k explicit SKUs, and reaching $95\%$ would require $\sim\!890$k.
 The pipeline therefore explicitly chooses to under-represent the long tail in
-exchange for a tractable embedding table; results in the tail are not directly
+exchange for a tractable embedding table and lower training-time costs, results in the tail are not directly
 addressable by the generator.
 
 \paragraph{Strong temporal item drift.}
@@ -965,7 +1085,7 @@ Relative to the train top-$K$ vocabulary, event-level OOV nearly doubles from
 training to test (Table~\ref{tab:oov-by-split}). This reflects the catalog
 itself shifting over the held-out window rather than only sampling noise, so
 absolute test metrics conflate generation quality with item-vocabulary drift.
-This is mitigated qualitatively by the $K$ cap discussion above and by reporting
+This is mentioned qualitatively by the $K$ cap discussion above and by reporting
 both train- and test-vocabulary OOV, but it cannot be eliminated without
 re-training on a moving window.
 
@@ -984,6 +1104,19 @@ kind. A hard prerequisite would therefore mark over a third of valid purchases
 as illegal. The pipeline accepts the resulting modeling complexity by combining
 hard legality checks (the bigram structure of Figure~\ref{fig:action-bigrams})
 with softer behavioral constraints, rather than enforcing a single rigid rule.
+
+\paragraph{Item names are opaque numeric vectors, not text.}
+The \texttt{name} field is published as a $16$-byte numeric vector
+rather than a readable string. The bytes are near-uniformly
+distributed ($99.9\%$ of maximal entropy) yet carry real category
+structure (nearest-neighbour same-category rate $19.71\%$ versus
+$0.25\%$ frequency-weighted chance, a $78.85\times$ lift), so the
+field is a quantized pre-computed embedding rather than
+either random noise or tokenizable text. The thesis therefore uses
+\texttt{name} as a learned input feature embedding
+(Section~\ref{sec:model-arch}), but cannot deploy text-encoder-based
+item heads such as two-tower retrieval over a text encoder,
+name-conditioned zero-shot generation, or BM25 candidate generation.
 
 \paragraph{Domain and provenance are retail-specific.}
 The dataset is a single-vendor (Synerise) retail e-commerce log released for
@@ -1059,7 +1192,7 @@ Field & Type & Description \\
 
 The \texttt{item\_id} field is nullable; the item prediction head is
 suppressed for \texttt{search\_query} and \texttt{page\_visit} events and no item target is produced
-or evaluated at those positions, as these action types do contain item-information in the dataset. Session boundaries are determined by an EOS
+or evaluated at those positions, as these action types do not contain item-information in the dataset. Session boundaries are determined by an EOS
 token predicted by the generator, subject to a maximum session length cap.
 The generator accepts the output of the arrival simulator as input and
 produces the schema in Table~\ref{tab:schema}. Context features such as
@@ -1068,16 +1201,14 @@ category and price are excluded from the output schema, but are included as inpu
 \subsection{System Architecture}
 \label{sec:system-arch}
 
-The system is organized into four stages: \emph{ingestion},
+The pipeline is organized into four stages: \emph{ingestion},
 \emph{training}, \emph{generation}, and \emph{evaluation}. Each stage
 runs as an independent process, and stages communicate exclusively
 through durable artefacts on disk rather than through in-memory handoffs.
-This is the natural framing for a system description because it is also
-what makes the experimental ladder of Section~\ref{sec:method-eval}
-reproducible: any single stage can be re-run while the upstream artefacts
+.Any single stage can be re-run while the upstream artefacts
 are held fixed. Figure~\ref{fig:system-containers} gives the
 container-level view of the four stages and the artefacts that connect
-them; this subsection then walks through each stage in turn, deferring
+them. This subsection then walks through each stage in turn, deferring
 the model internals to Section~\ref{sec:model-arch} and the validity
 layer to Section~\ref{sec:validity}.
 
@@ -1094,19 +1225,19 @@ given in Figure~\ref{fig:generation-runtime}
 \label{fig:system-containers}
 \end{figure*}
 
-\paragraph{Stage 1 -- Ingestion.}
+\paragraph{Stage 1: Ingestion.}
 The raw Synerise event stream is cleaned, time-aware split into train,
 validation, and test partitions, and reduced to a top-$K$ item vocabulary
 that maps the long catalog tail to a shared zero index. Offline, a second
 ingestion job constructs the SVD-PQ codebook used by the third model
-iteration: a truncated SVD of the weighted user--item interaction matrix
+iteration: a truncated SVD of the weighted user-item interaction matrix
 followed by per-dimension quantile binning, producing one fixed-length
 token tuple per SKU. The full preprocessing pipeline, the rationale for
 $K$, and the empirical justifications for the split and the codebook
 threshold are detailed in Section~\ref{sec:method-data} and
 Section~\ref{sec:iter3-svdpq}.
 
-\paragraph{Stage 2 -- Training.}
+\paragraph{Stage 2: Training.}
 The dataset loader reads the cleaned parquet partitions and emits
 $(\text{prefix}, \text{target})$ pairs together with a cross-session
 memory window of the user's $H$ most recent prior events. The
@@ -1120,14 +1251,13 @@ of the item head, is described in Section~\ref{sec:model-arch}; the
 search procedure and final hyperparameter values are in
 Section~\ref{sec:hparam}.
 
-\paragraph{Stage 3 -- Generation runtime.}
-The arrival simulator yields $(\texttt{user\_id}, \texttt{session\_id})$
+\paragraph{Stage 3: Generation runtime.}
+The arrival simulator yields (\texttt{user\_id}, \texttt{session\_id})
 tuples that drive a session-based autoregressive generator. For each
 session, the trained checkpoint is unrolled step by step, with the input
 embedding summing the running session prefix and a cross-session memory
 window over the same user's prior sessions; at each step the three
-factored heads jointly produce an action, an item (suppressed for
-\texttt{search\_query} and \texttt{page\_visit}), and an inter-event
+factored heads jointly produce an action, an item, and an inter-event
 time. The session terminates on EOS. Before the session is written to
 the output log it passes through the hard-constraint validity layer
 (Section~\ref{sec:validity}), which is reported both pre- and
@@ -1136,7 +1266,7 @@ measurable. Figure~\ref{fig:generation-runtime} in
 Appendix~\ref{sec:appendix-arch-diagrams} shows the component-level
 view of this stage.
 
-\paragraph{Stage 4 -- Evaluation.}
+\paragraph{Stage 4: Evaluation.}
 The evaluation stage consumes the generated session log and the real
 held-out parquet split as sibling inputs and produces the fidelity,
 validity, and downstream-utility (TSTR) metrics defined in
@@ -1144,8 +1274,7 @@ Section~\ref{sec:method-eval}. Because the inputs to this stage are
 plain logs that share the schema of Table~\ref{tab:schema}, the same
 evaluation harness is used for the transformer generator and for the
 Markov baseline of Section~\ref{sec:portfolio}, which is the
-prerequisite for treating the comparison as a fair test of the
-architecture rather than of the surrounding pipeline.
+prerequisite for treating the comparison as a fair test.
 
 \paragraph{Interfaces and artefacts.}
 The artefacts that pin the system down are the cleaned and split
@@ -1153,17 +1282,16 @@ parquets, the top-$K$ vocabulary file, the SVD-PQ codebook, the trained
 model checkpoint, and the generated session log (whose schema is
 Table~\ref{tab:schema}). Each artefact has a stable on-disk
 representation, so the four stages can be developed and re-run
-independently as long as the upstream artefact is fixed --- a property
-the experimental ladder of Section~\ref{sec:method-eval} relies on.
+independently as long as the upstream artefact is fixed.
 
 \subsection{Model Architecture}
 \label{sec:model-arch}
 
 The project evaluates three model architectures across successive
 iterations. All three share the same transformer backbone, action head,
-temporal head, and cross-session memory; they differ only in how the next
+temporal head, and cross-session memory and differ only in how the next
 SKU is predicted from the shared hidden state. The common scaffold is
-described once below; each item-prediction variant is then summarized in
+described once below: each item-prediction variant is then summarized in
 turn. The corresponding architecture diagrams are reproduced in
 Appendix~\ref{sec:appendix-arch-diagrams}.
 
@@ -1180,8 +1308,57 @@ log-spaced inter-event-time bins. Training is teacher-forced with summed
 cross-entropy losses on the three heads
 (\texttt{simulation/generator/session\_transformer.py}).
 
+\paragraph{Cross-session memory window.}
+The window size $H = 16$ is chosen to match the mean session length on
+the cleaned training corpus ($\overline{|s|} = 15.97$ events), so that
+on average one full prior session of context is available at each
+generation step. This sets the cross-attention budget at the natural
+unit of behaviour the generator operates on a session, rather
+than at an event count. Under this choice the entire prior
+event history of $60.9\%$ of training users fits losslessly inside the
+window, while the remaining users contribute their most recent $H$
+events. The diminishing returns of larger $H$ are summarized in
+Table~\ref{tab:history-window-coverage}: cross-attention cost doubles
+each time $H$ doubles, while the marginal lossless-coverage gain
+shrinks. $H = 16$ therefore sits on the cheap side of the
+coverage--cost knee, with $H = 32$ identified as the natural ablation
+should long-history users prove undersampled.
+
+\begin{table}[t]
+\caption{Cross-session memory window coverage. ``Lossless coverage''
+is the share of training users whose entire event history fits inside
+the window; cross-attention cost scales as $O(L \cdot H)$ per layer
+relative to $H = 16$.}
+\label{tab:history-window-coverage}
+\small
+\begin{tabular}{@{}r r r@{}}
+\toprule
+$H$ & Lossless coverage & Cross-attn cost (rel.) \\
+\midrule
+$16$  & $60.9\%$ & $1\times$  \\
+$32$  & $79.2\%$ & $2\times$  \\
+$64$  & $90.5\%$ & $4\times$  \\
+$128$ & $96.2\%$ & $8\times$  \\
+$256$ & $98.7\%$ & $16\times$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 \subsubsection{Iteration 1: Flat softmax over the full SKU vocabulary}
 \label{sec:iter1-flat}
+\textit{Concept.} A vanilla baseline that predicts the SKU directly
+from the hidden state with a single $K$-way softmax. The value
+proposition is methodological: before adding any structural prior to
+the item head, establish whether the simple formulation already
+produces acceptable fidelity, validity, and bias readings, so that
+subsequent iterations have a real baseline to improve over rather than
+a strawman.
+\textit{Test setup.} Trained on the train split and evaluated on the
+validation split using the fidelity, validity, and bias metrics of
+Section~\ref{sec:method-eval}. As the first iteration, its readings
+serve as the reference point that informs the design choices of
+Iteration~2 rather than as a pass/fail signal.
+
 The baseline iteration predicts the next SKU with a single softmax over the
 entire top-$K$ vocabulary ($K \approx 200{,}000$). The item head
 (\texttt{ItemHead} in \texttt{heads.py} with \texttt{n\_categories=0}) is a
@@ -1194,14 +1371,29 @@ iterations. The softmax denominator runs over all $K$ classes at every
 item-bearing position, so the gradient signal on tail SKUs is diluted by
 competition with the popularity head; and the head treats SKUs as
 independent symbols, with no built-in notion of which items are
-substitutable. Empirically this produced a Gini coefficient and item
-coverage well below the held-out reference
-(Section~\ref{sec:results-iter1}), with item coverage collapsing to
-$\sim\!0.012$. The architecture diagram is in
-Figure~\ref{fig:arch-iter1}.
+substitutable.
+%Empirically this produced a Gini coefficient and item
+%overage well below the held-out reference
+%(Section~\ref{sec:results-iter1}), with item coverage collapsing to
+%$\sim\!0.012$. The architecture diagram is in
+%Figure~\ref{fig:arch-iter1}.
 
 \subsubsection{Iteration 2: Hierarchical category $\rightarrow$ item}
 \label{sec:iter2-hier}
+\textit{Concept.} Introduce the dataset's category labels as a hard
+structural prior on the item head, so that the popularity-driven
+gradient signal of Iteration~1 is broken into a category-level decision
+followed by a much smaller in-category decision. The value proposition
+is targeted towardsthe bias group (item coverage, popularity JSD,
+$\Delta$Gini) was the failure mode of Iteration~1, and category-level
+factorization addresses it without changing the action or
+temporal heads.
+\textit{Test setup.} Trained on the train split and evaluated on the
+validation split against the Iteration~1 reference point on the same
+metric suite. Pass condition: improved item coverage and reduced
+$\Delta$Gini relative to Iteration~1 without regressing the action and
+temporal fidelity metrics.
+
 The second iteration exploits the dataset's category labels as a hard
 structural prior. A new \texttt{CategoryHead} predicts a category index
 from the hidden state, and the item head then samples within the SKU pool
@@ -1224,14 +1416,31 @@ architecture diagram is in Figure~\ref{fig:arch-iter2}.
 
 \subsubsection{Iteration 3: SVD-PQ token-factored item head}
 \label{sec:iter3-svdpq}
-The third iteration replaces the item softmax with a factored
-representation borrowed from GPTRec~\cite{petrov2023gptrec}. Each SKU is
-encoded offline as a fixed-length tuple of $t$ discrete tokens drawn from
-$v$ bins, derived by truncated SVD of the weighted user--item interaction
-matrix followed by per-dimension quantile binning
-(\texttt{ingestion/svdpq.py}). The project uses $t=4$ tokens of $v=512$
-bins. Items that interact with similar users land in nearby quantization
-cells, so semantically related SKUs share leading tokens.
+\textit{Concept.} Replace the per-SKU softmax with a small set of
+shared discrete tokens drawn from an offline SVD-PQ codebook
+(GPTRec-style~\cite{petrov2023gptrec}), so that semantically related
+SKUs share leading tokens and therefore share gradient signal. The
+value proposition is twofold: it spreads the item-side gradient across
+$tv$ token cells rather than $K$ output classes (so tail SKUs are no
+longer drowned out at training time even within a category pool) and
+it collapses the head's parameter count from $\mathcal{O}(Kd)$ to
+$\mathcal{O}(tvd)$, freeing VRAM that can be redirected into a deeper
+backbone or longer cross-session memory.
+\textit{Test setup.} Trained on the train split and evaluated on the
+validation split against Iteration~2 on the same metric suite,
+augmented with the in-training TSTR probe of
+Section~\ref{sec:tstr} as the model-selection signal. Pass condition:
+bias group on par with or better than Iteration~2 \emph{and} TSTR
+HR@10 above Iteration~2 on the validation split, so that the gain is
+not only distributional but also actually helpful for downstream
+recommender training.
+
+Each SKU is encoded offline as a fixed-length tuple of $t$ discrete
+tokens drawn from $v$ bins, derived by truncated SVD of the weighted
+user--item interaction matrix followed by per-dimension quantile
+binning (\texttt{ingestion/svdpq.py}). The project uses $t=4$ tokens
+of $v=512$ bins. Items that interact with similar users land in nearby
+quantization cells, so semantically related SKUs share leading tokens.
 
 \paragraph{Event-type weighting.}
 Each $(\textit{user}, \textit{item})$ cell of the interaction matrix
@@ -1248,8 +1457,7 @@ actually express preference rather than by browse traffic.
 \begin{table}[h]
 \centering
 \caption{Per-action SVD-PQ event weights $w_a = \log(N / n_a)$
-computed on the cleaned event corpus ($N = 101{,}859{,}688$ events).
-Rare but informative actions receive higher weight.}
+computed on the cleaned event corpus ($N = 101{,}859{,}688$ events exluding test-set).}
 \label{tab:svdpq-event-weights}
 \small
 \begin{tabular}{@{}l r r@{}}
@@ -1267,20 +1475,21 @@ Action type $a$ & $n_a$ & $w_a$ \\
 
 The item head (\texttt{SVDPQItemHead} in \texttt{heads.py}) is a single
 linear projection whose output is reshaped into $t$ parallel $v$-way logit
-vectors, and the training loss is the mean cross-entropy over those $t$
+vectors. The training loss is the mean cross-entropy over those $t$
 token positions, with optional per-dimension label smoothing to bound the
-joint peak probability. The category head from Iteration~2 is retained as
-input conditioning, but the category no longer enforces a hard pool mask
-at training time. At inference, the model still samples a category to
-preserve the in-pool semantics of Iteration~2 and then ranks the SKUs in
-that pool either by Hamming match against a sampled token tuple or by
-their factored log-likelihood under the predicted token distribution
-(\texttt{\_sample\_svdpq\_pool}).
+joint peak probability.
+%The category head from Iteration~2 is retained as
+%input conditioning, but the category no longer enforces a hard pool mask
+%at training time. At inference, the model still samples a category to
+%preserve the in-pool semantics of Iteration~2 and then ranks the SKUs in
+%that pool either by Hamming match against a sampled token tuple or by
+%%their factored log-likelihood under the predicted token distribution
+%(\texttt{\_sample\_svdpq\_pool}).
 
 This collapses the head's parameter count from order $K\!\cdot\! d$ to
 order $t v\!\cdot\! d$ ($\approx 200{,}000\,d \rightarrow 2{,}048\,d$ in
 this setting), and the training-time softmax denominator runs over
-$tv = 2{,}048$ outputs rather than $K$. Following the GPTRec rationale,
+$tv = 2{,}048$ outputs rather than $K$. Following GPTRec,
 forcing related SKUs to share leading tokens is expected to spread the
 gradient signal across token cells rather than concentrating it on
 individual head SKUs, mitigating the mode-collapse pathology of
@@ -1292,13 +1501,13 @@ SKUs with too few interactions to support a meaningful SVD position are
 treated as cold and assigned their category centroid in token space rather
 than receiving an individually estimated embedding. The threshold is
 \texttt{svdpq\_min\_interactions}$\,=\,2$: a SKU observed in only a single
-user--item cell yields no co-occurrence signal for SVD, so its
+user–item cell yields no co-occurrence signal for SVD, so its
 factor-space coordinates would be fully determined by that one user's row
 and would not carry the relational structure the codebook is meant to
 capture. Two is therefore the minimum value at which every SVD-embedded
 SKU appears in at least two distinct user contexts.
 Figure~\ref{fig:cold-skus-threshold} shows the trade-off: at this
-threshold roughly $40\%$ of catalog SKUs fall back to the category
+threshold, roughly $40\%$ of catalog SKUs fall back to the category
 centroid, but these are by construction the rarest SKUs and account for a
 correspondingly tiny share of training item-bearing events. Raising the
 threshold further (e.g., to~$5$) would push $\approx\!78\%$ of SKUs into
@@ -1337,6 +1546,16 @@ Generated sessions pass through explicit validity checks before output:
 Both pre-constraint and post-constraint statistics are reported, making the
 cost of constraint repair independently measurable.
 
+\paragraph{Design safeguards.}
+The validity layer is an AI-specific \emph{guardrail} in the generation
+pipeline against behaviorally implausible outputs, and pre/post-repair
+reporting turns its decisions into an \emph{auditable} signal rather
+than a silent rewrite. The cold-SKU fallback
+(Section~\ref{sec:iter3-svdpq}) complements it as a
+\emph{graceful-degradation} path for SKUs with insufficient
+co-occurrence signal, avoiding silent embedding-quality cliffs at the
+long tail.
+
 \subsection{Comparison Portfolio}
 \label{sec:portfolio}
 Three conditions are evaluated:
@@ -1358,12 +1577,97 @@ Three conditions are evaluated:
 
 \subsection{Hyperparameter Tuning and Training Procedure}
 \label{sec:hparam}
-[TODO~--~final architecture configuration: number of layers $L$, hidden
-size, number of attention heads, history window $H$, item vocabulary
-size $K$, number of time bins, dropout, optimizer, learning rate schedule,
-batch size, number of epochs, early-stopping criterion, total wall-clock
-training time, and the hyperparameter search strategy used (grid, random,
-Bayesian) with the reported search space.]
+
+The pipeline is configuration-driven: every tunable knob is exposed
+through a single YAML file (\texttt{config.yaml}) and consumed by the
+ingestion, training, generation, and evaluation stages without
+code changes. Table~\ref{tab:hyperparams} enumerates the hyperparameters
+together with the configuration key under which each is set; search
+ranges and the strategy used to select final values are reported below
+the table.
+
+\begin{table}[t]
+\caption{Tunable hyperparameters of the pipeline, grouped by stage.
+Configuration keys correspond verbatim to entries in \texttt{config.yaml}.
+Search ranges and the selected values are reported below the table
+[TODO].}
+\label{tab:hyperparams}
+\small
+\begin{tabularx}{\columnwidth}{@{}l l X@{}}
+\toprule
+Group & Config key & Description \\
+\midrule
+\multirow{4}{*}{Sessionization}
+  & \texttt{session\_timeout\_min} & Inactivity gap that starts a new session (min). \\
+  & \texttt{history\_window}       & Cross-session memory window $H$ (events). \\
+  & \texttt{train\_cutoff}         & Train/validation split date (session-start). \\
+  & \texttt{val\_cutoff}           & Validation/test split date (session-start). \\
+\midrule
+\multirow{1}{*}{Vocabulary}
+  & \texttt{vocab\_k}              & Top-$K$ item vocabulary cap. \\
+\midrule
+\multirow{2}{*}{Temporal head}
+  & \texttt{n\_temporal\_bins}     & Number of log-spaced $\delta_t$ bins. \\
+  & \texttt{temporal\_min\_s}      & Minimum representable inter-event delta (s). \\
+\midrule
+\multirow{8}{*}{Transformer}
+  & \texttt{train\_d\_model}       & Hidden dimension $d$. \\
+  & \texttt{train\_n\_layers}      & Number of decoder layers $L$. \\
+  & \texttt{train\_n\_heads}       & Attention heads (must divide $d$). \\
+  & \texttt{train\_max\_length}    & Max events per session, including EOS. \\
+  & \texttt{train\_batch\_size}    & Mini-batch size. \\
+  & \texttt{train\_lr}             & AdamW learning rate. \\
+  & \texttt{train\_epochs}         & Maximum training epochs. \\
+  & \texttt{train\_patience}       & Probes without HR@$k$ gain before stop. \\
+\midrule
+\multirow{1}{*}{Category head}
+  & \texttt{category\_rare\_threshold} & SKU count below which a category is collapsed to RARE. \\
+\midrule
+\multirow{6}{*}{SVD-PQ item head}
+  & \texttt{svdpq\_t}                  & Tokens per SKU. \\
+  & \texttt{svdpq\_v}                  & Bins per token dimension. \\
+  & \texttt{svdpq\_label\_smoothing}   & Per-dim CE label smoothing. \\
+  & \texttt{svdpq\_binning}            & \texttt{quantile} or \texttt{uniform}. \\
+  & \texttt{svdpq\_noise\_std}         & Pre-bin Gaussian noise stddev. \\
+  & \texttt{svdpq\_min\_interactions}  & Cold-SKU fallback threshold. \\
+\midrule
+\multirow{2}{*}{Loss weighting}
+  & \texttt{loss\_weights\_enabled}     & Enable per-head loss weighting. \\
+  & \texttt{loss\_weights}              & 4-entry vector: action, category, item, temporal. \\
+\midrule
+\multirow{2}{*}{Bias mitigation}
+  & \texttt{item\_loss\_freq\_weight\_alpha} & Inverse-frequency item-CE exponent $\alpha$. \\
+  & \texttt{cat\_logit\_adj\_tau}            & Menon logit-adjustment strength $\tau$. \\
+\midrule
+\multirow{4}{*}{Inference}
+  & \texttt{infer\_temperature}      & Action / category / temporal softmax temperature. \\
+  & \texttt{infer\_item\_temperature} & Item-head sampling temperature. \\
+  & \texttt{infer\_pool\_temperature} & SVD-PQ in-pool softmax temperature. \\
+  & \texttt{svdpq\_infer\_scorer}    & \texttt{hamming} or \texttt{log\_prob} pool scorer. \\
+\midrule
+\multirow{4}{*}{In-training TSTR probe}
+  & \texttt{is\_best\_eval\_enabled}        & Use TSTR HR@$k$ as best-ckpt signal. \\
+  & \texttt{is\_best\_eval\_every\_n\_epochs} & Probe cadence (epochs). \\
+  & \texttt{is\_best\_eval\_n\_sessions}    & Synthetic sessions per probe seed. \\
+  & \texttt{is\_best\_eval\_k}              & Cutoff $k$ for HR@$k$ / NDCG@$k$. \\
+\midrule
+\multirow{2}{*}{Final evaluation}
+  & \texttt{final\_eval\_n\_sessions} & Synthetic sessions per evaluation seed. \\
+  & \texttt{final\_eval\_seeds}       & Random seeds for multi-seed reporting. \\
+\midrule
+\multirow{6}{*}{GRU4Rec downstream}
+  & \texttt{gru4rec\_embed\_dim}      & Item embedding size. \\
+  & \texttt{gru4rec\_hidden\_dim}     & GRU hidden size. \\
+  & \texttt{gru4rec\_max\_epochs}     & Maximum training epochs. \\
+  & \texttt{gru4rec\_batch\_size}     & Mini-batch size. \\
+  & \texttt{gru4rec\_lr}              & Adam learning rate. \\
+  & \texttt{gru4rec\_patience}        & Early-stopping patience. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+[To write:  search range
+per knob, selected final values, total wall-clock training time.]
 
 %% =====================================================================
 \section{Methodology: Evaluation}
@@ -1403,8 +1707,7 @@ mechanically depressed for any synthetic batch smaller than the
 multi-million-session reference.
 
 The L1 distance on the item bigram transition matrix was considered and
-discarded after inspection: with a top-$K$-capped vocabulary of $\sim
-10^5$ SKUs, the bigram matrix is so sparse that the metric is dominated
+discarded after inspection: the bigram matrix is so sparse that the metric is dominated
 by which UNK-adjacent transitions either side happens to sample, and
 adds no signal beyond the popularity JSD and item-coverage bias metrics
 that already cover item-side concentration.
@@ -1451,14 +1754,14 @@ NDCG@10 are the standard benchmarks in sequential RS
 research~\cite{hidasi2015gru4rec,kang2018sasrec,sun2019bert4rec} and follow the TSTR
 evaluation framing of Jordon et al.~\cite{jordon2022synthetic}.
 
-In addition to the end-of-training TSTR run, an in-training TSTR probe
-(\texttt{evaluation/in\_train\_tstr.py}) drives best-checkpoint
-selection: every $N$ epochs the candidate checkpoint generates synthetic
-sessions for $K$ seeds, a fresh GRU4Rec is fit on each, and the mean
-HR@$k$ on the real validation split is used as the model-selection
-signal. This decouples checkpointing from validation cross-entropy,
-which is a poor proxy for downstream fidelity (see appendix on
-val-loss/fidelity decoupling).
+%In addition to the end-of-training TSTR run, an in-training TSTR probe
+%(\texttt{evaluation/in\_train\_tstr.py}) drives best-checkpoint
+%selection: every $N$ epochs the candidate checkpoint generates synthetic
+%sessions for $K$ seeds, a fresh GRU4Rec is fit on each, and the mean
+%HR@$k$ on the real validation split is used as the model-selection
+%signal. This decouples checkpointing from validation cross-entropy,
+%%which is a poor proxy for downstream fidelity (see appendix on
+%val-loss/fidelity decoupling).
 
 \subsection{Reliability and Validity}
 \label{sec:reliability-validity}
@@ -1472,7 +1775,7 @@ initialization. This follows the repeated-run practice recommended by
 T-RECS~\cite{lucherini2021trecs}.
 
 \paragraph{Construct validity.}
-The fidelity metrics are deliberately non-redundant. JSD over action
+The fidelity metrics are non-redundant. JSD over action
 types captures whether the generator produces the right behavioral mix
 at the marginal level~\cite{lin1991jsd}; the action bigram L1 goes one
 level deeper and checks whether the sequential ordering of actions is
@@ -1503,226 +1806,170 @@ the Synerise dataset. No action type is excluded from the evaluation.
 \section{Results}
 \label{sec:results}
 
+This section is intentionally left without numerical content in the
+present version of the document. At the time of writing, training and
+evaluation runs are in progress but hyperparameter tuning has not yet
+converged on the configuration that will be used for the final
+experiments. Reporting interim numbers here invite would show temporary numbers as conclusive when they ar provisional
+diagnostics used to drive the next round of hyperparameter selection.
+The final results reported in this section will be those
+produced by the per-iteration models retrained on the union of the
+training and validation splits, evaluated on the held-out test split,
+under the multi-seed protocol of Section~\ref{sec:eval-setup}.
+The structure of what will be reported, the
+metric definitions, and the threshold for the directional utility
+claim are fixed in advance in
+Sections~\ref{sec:fidelity}--\ref{sec:tstr} and are not contingent on
+the numbers themselves.
+
 \subsection{Quantitative Results}
-
-\subsubsection{Fidelity}
-[TODO~--~report final fidelity numbers in a table comparing TSTR-M and
-TSTR-T on JSD(action), KS(session length), L1(action transition), and
-L1(item transition). Mean$\pm$std over five seeds. Brief textual summary of
-which generator wins on which metric.]
-
-\begin{table}[h]
-  \caption{Fidelity results (mean $\pm$ std across 5 seeds). Lower is better
-    for all metrics.}
-  \label{tab:results-fidelity}
-  \small
-  \begin{tabular}{lcc}
-    \toprule
-    Metric & TSTR-M & TSTR-T \\
-    \midrule
-    JSD(action)              & [TODO] & [TODO] \\
-    KS(session length)       & [TODO] & [TODO] \\
-    L1(action bigram)        & [TODO] & [TODO] \\
-    L1(item bigram)          & [TODO] & [TODO] \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\subsubsection{Validity}
-[TODO~--~report violation rates pre- and post-constraint layer for both
-generators. The repair cost is the difference, expressed as a percentage of
-events repaired or sessions affected.]
-
-\begin{table}[h]
-  \caption{Validity violation rates (\%), pre/post hard-constraint layer.}
-  \label{tab:results-validity}
-  \small
-  \begin{tabular}{lcccc}
-    \toprule
-    & \multicolumn{2}{c}{TSTR-M} & \multicolumn{2}{c}{TSTR-T} \\
-    \cmidrule(lr){2-3}\cmidrule(lr){4-5}
-    Violation type & pre & post & pre & post \\
-    \midrule
-    Illegal action transition  & [TODO] & [TODO] & [TODO] & [TODO] \\
-    Timestamp monotonicity     & [TODO] & [TODO] & [TODO] & [TODO] \\
-    Purchase w/o prior exposure & [TODO] & [TODO] & [TODO] & [TODO] \\
-    \bottomrule
-  \end{tabular}
-\end{table}
-
-\subsubsection{Downstream Utility}
-[TODO~--~TRTR upper bound and TSTR-M, TSTR-T HR@10 / NDCG@10 numbers.
-State whether the directional claim (TSTR-T $>$ TSTR-M on both metrics)
-holds.]
-
-\begin{table}[h]
-  \caption{Downstream utility under the TSTR paradigm
-    (mean $\pm$ std across 5 seeds).}
-  \label{tab:results-utility}
-  \small
-  \begin{tabular}{lcc}
-    \toprule
-    Condition & HR@10 & NDCG@10 \\
-    \midrule
-    TRTR (upper bound) & [TODO] & [TODO] \\
-    TSTR-M (baseline)  & [TODO] & [TODO] \\
-    TSTR-T (proposed)  & [TODO] & [TODO] \\
-    \bottomrule
-  \end{tabular}
-\end{table}
+See note above. Final fidelity, validity, and downstream-utility
+numbers will be inserted here once the test-split evaluation has been
+run on the train+val-retrained models. The table shells, metric
+definitions, and seed protocol for the final tables are specified in
+Sections~\ref{sec:fidelity}--\ref{sec:tstr}.
 
 \subsection{Qualitative Results}
-[TODO~--~example generated sessions side by side with real ones. Highlight
-realistic patterns the transformer captures (e.g., browse $\rightarrow$
-add-to-cart $\rightarrow$ purchase funnels) and any failure modes (e.g.,
-implausible loops, degenerate sessions). If applicable, add a small
-visualization of the learned action transition matrix vs.\ the real one.]
+See note above. Generated-vs-real session examples and any
+qualitative failure-mode analysis will be drawn from the final
+test-split generation runs, not from interim training checkpoints.
 
 \subsection{Ablation Studies}
-[TODO~--~if performed, describe ablations: e.g.,\ removing the constraint
-layer, removing cross-session history, replacing factored heads with a
-flat action--item vocabulary, varying $K$ or $H$. Report the contribution
-of each component to the final metrics.]
+See note above. Ablations, if performed, will be reported on the
+same final configuration so that the contribution of individual
+components is measured against a fixed baseline rather than against
+a moving target during hyperparameter tuning.
 
 %% =====================================================================
 \section{Discussion}
 \label{sec:discussion}
 
 \subsection{Interpretation of Findings}
-[TODO~--~tie the results back to each research sub-question. For SQ1,
-state whether the schema and interface contract held up under generation.
-For SQ2, state whether the architectural properties produced the expected
-benefits over Markov. For SQ3, reflect on whether the comparison portfolio
-was sufficient. For SQ4, state whether the protocol was indeed falsifiable
-and reproducible in practice.]
+%[TODO~--~tie the results back to each research sub-question. For SQ1,
+%state whether the schema and interface contract held up under generation.
+%For SQ2, state whether the architectural properties produced the expected
+%benefits over Markov. For SQ3, reflect on whether the comparison portfolio
+%was sufficient. For SQ4, state whether the protocol was indeed falsifiable
+%and reproducible in practice.]
 
 \subsection{Validity}
-\paragraph{Internal validity.} Threats include training instability, seed
-sensitivity, and metric implementation bugs. Mitigations: fixed seeds,
-deterministic preprocessing, and reporting variance across five seeds.
-[TODO~--~note any internal-validity issues actually encountered during
-the project.]
+%\paragraph{Internal validity.} Threats include training instability, seed
+%sensitivity, and metric implementation bugs. Mitigations: fixed seeds,
+%deterministic preprocessing, and reporting variance across five seeds.
+%[TODO~--~note any internal-validity issues actually encountered during
+%the project.]
 
-\paragraph{External validity.} The Synerise dataset originates from a
-retail e-commerce platform; the schema, hard constraints, and validity
-rules represent retail conventions. Generalization to other domains
-(news, media, music) would require re-derivation of the constraint set
-from domain-appropriate data.
+\paragraph{External validity.}
+%The Synerise dataset originates from a
+%retail e-commerce platform; the schema, hard constraints, and validity
+%rules represent retail conventions. Generalization to other domains
+%(news, media, music) would require re-derivation of the constraint set
+%from domain-appropriate data.
 
-\paragraph{Construct validity.} The fidelity metrics each capture a
-distinct property of generated sessions, as argued in
-Section~\ref{sec:reliability-validity}. The TSTR utility evaluation
-operationalizes the practical question, ``does this synthetic data train
-a useful recommender?''
+\paragraph{Construct validity.}
+%The fidelity metrics each capture a
+%distinct property of generated sessions, as argued in
+%Section~\ref{sec:reliability-validity}. The TSTR utility evaluation
+%operationalizes the practical question, ``does this synthetic data train
+%a useful recommender?''
 
-\paragraph{Ecological validity.} Offline evaluation results are bounded
-to static log fidelity and training-set utility, and do not predict
-generator performance under live deployment with real feedback dynamics.
-Live A/B testing is out of scope.
+\paragraph{Ecological validity.}
+%Offline evaluation results are bounded
+%to static log fidelity and training-set utility, and do not predict
+%generator performance under live deployment with real feedback dynamics.
+%Live A/B testing is out of scope.
 
 \subsection{Reliability}
-Five-seed variance reporting operationalizes test--retest reliability.
-[TODO~--~comment on the actual variance observed: whether the seed-to-seed
-spread was small enough to support claims, or whether some metric showed
-high variance and therefore warrants caution in interpretation.]
+%Five-seed variance reporting operationalizes test--retest reliability.
+%[TODO~--~comment on the actual variance observed: whether the seed-to-seed
+%spread was small enough to support claims, or whether some metric showed
+%igh variance and therefore warrants caution in interpretation.]
 
 \subsection{Limitations}
-The following limitations should temper the interpretation of the results.
+The following limitations should temper the interpretation of the
+results. Data-side limitations are discussed in
+Section~\ref{sec:data-limitations}; this subsection covers limitations
+of the model and evaluation.
+
 \begin{itemize}[leftmargin=*]
-  \item \textbf{Comparison scope.} The comparison portfolio is restricted
-    to a single Markov baseline. Stronger baselines such as
-    GRU/LSTM-based or GAN-based generators are out of scope and identified
-    as future work.
+  \item \textbf{Comparison scope.} The portfolio is restricted to a
+    single Markov baseline. Stronger baselines (GRU/LSTM-based or
+    GAN-based generators) are identified as future work.
   \item \textbf{Single dataset.} Results are reported on Synerise only;
     cross-dataset generalization is not tested.
-  \item \textbf{Throughput.} Autoregressive generation is inherently
-    sequential at inference time. If the generator cannot keep pace with
-    the arrival simulator at full scale, the pipeline may stall; batched
-    generation is identified as a fallback.
-  \item \textbf{Bias inheritance.} The generator inherits whatever
-    popularity skew and temporal selection effects are present in the
-    training data. Bias metrics are reported, but reporting does not
-    eliminate the bias.
   \item \textbf{Offline-only evaluation.} As discussed under ecological
     validity, no live deployment or A/B testing is performed.
-  \item \textbf{Training time.} Training time of large transformers is very high due to the large amount of parameters and high cost of backprop. This directly limits the scope and size of ablations and iterations that can be performed.
-  \item \textbf{TSTR-Evaluation.} TSTR evaluation is depended on the interaction generator providing a valid dataset for training. Should mode collapse happen upstream in the pipeline, the resulting downstream recommender model will show artificially high scores due to a significantly easier dataset to train on. This makes comparisons between different architectures more difficult, as circumstances between architectures may cause differing scenario's for the downstream models.
-  \item \textbf{Teacher-forced training.} A downside of the teacher-forced training paradigm is that you train models to predict based on ground truth, while at inference time, the model is predicting based on infered truth. This may cause a drift. [Basically: Preal vs Pchance]
-  This can be sidestepped somewhat with negative sampling or stuff like that, but due to time constraints, is not done.
-  \item \textbf{Seasonal shopping patterns.} Time-series data, especially in e-commerce settings is highly depended on the seasonality. Different times of the year see varying shopping activity, and item popularity distributions based on what topical event is occurring. Christmas, Black friday, Summer vacation periods for example showcase different item distributions and popularities.
-  \item \textbf{Downstream evaluation OOV.} Another consequence of time-series data is OOV (Out of Vocabulary) when evaluating due to seasonal drift. One of the models may only sample / generate a small subset of the total amount of possible SKU's in that dataset when evaluating. This is partly due to seasonal missmatch, but this has adverse effects on the legitimatcy of the TSTR-module. To combat this, a shared OOV vocab filter is applied to both TSTR models and the TRTR model, to ensure they share the same VOCAB at all times.
+  \item \textbf{Training cost.} Transformer training cost limits the
+    number of ablations and iterations that could be run within the
+    project timeline.
+  \item \textbf{Throughput.} Autoregressive generation is sequential at
+    inference time. If the generator cannot keep pace with the arrival
+    simulator at full scale, the pipeline may stall; batched generation
+    is identified as a fallback.
+  \item \textbf{Teacher-forced training.} The model is trained on
+    ground-truth prefixes but generates from its own prior outputs at
+    inference time. This exposure-bias gap can produce drift over long
+    rollouts. Standard mitigations such as scheduled sampling or
+    sequence-level training were not pursued due to time constraints.
+  \item \textbf{Bias inheritance.} The generator inherits the
+    popularity skew and temporal selection effects of the training
+    data. Bias metrics are reported, but reporting does not eliminate
+    the bias.
+  \item \textbf{Seasonal non-stationarity.} E-commerce traffic and
+    item popularity vary sharply across the year (Black~Friday,
+    Christmas, summer vacations). The test split sits inside one such
+    regime (early December) by construction
+    (Section~\ref{sec:method-data}), so held-out performance
+    conflates generation quality with seasonal extrapolation from the
+    June--November training window.
+  \item \textbf{TSTR can reward mode collapse.} TSTR scores depend on
+    the synthetic training set being a representative learning signal.
+    A generator that collapses onto a small head of popular SKUs
+    produces an artificially easy next-item prediction task, on which
+    the downstream recommender can score highly despite the upstream
+    failure. This is the principal reason the bias group (item
+    coverage, popularity JSD, $\Delta$Gini) is reported alongside TSTR
+    rather than absorbed into a single utility number.
+  \item \textbf{Shared-vocabulary TSTR comparability.} Seasonal item
+    drift means different generators may sample different SKU subsets,
+    so vocabularies diverge across runs. To keep TSTR-T, TSTR-M, and
+    TRTR comparable, a shared vocabulary filter is applied across all
+    three. The trade-off is that absolute TSTR scores are computed on
+    a reduced vocabulary and are not directly comparable to TSTR
+    numbers reported elsewhere in the literature; only the
+    within-thesis comparison is intended to be read as a like-for-like
+    test.
 \end{itemize}
 
 \subsection{Ethical Reflection}
-The risk of feedback loop amplification through synthetic training data is
-acknowledged in Section~\ref{sec:ai-considerations} and addressed by
-explicit bias reporting rather than silent inheritance. The generation
-pipeline is restricted to aggregate training data generation; use for
-individual-level profiling is out of scope. Documented bias characteristics
-make the pipeline more controllable than an unexamined historical log,
-but the underlying tension, that synthetic data trained on biased logs
-inherits those biases, remains.
+%The risk of feedback loop amplification through synthetic training data is
+%acknowledged in Section~\ref{sec:ai-considerations} and addressed by
+%explicit bias reporting rather than silent inheritance. The generation
+%pipeline is restricted to aggregate training data generation; use for
+%individual-level profiling is out of scope. Documented bias characteristics
+%make the pipeline more controllable than an unexamined historical log,
+%but the underlying tension, that synthetic data trained on biased logs
+%inherits those biases, remains.
 
 %% =====================================================================
 \section{Conclusion}
 \label{sec:conclusion}
 
 \subsection{Summary of Contributions}
-This thesis presented (1) a multi-head autoregressive transformer
-architecture for typed event tuple generation, embedded in a process-based
-simulation wrapper; (2) an explicit hard-constraint validity layer that
-makes generation assumptions auditable; and (3) a reproducible evaluation
-protocol covering fidelity, validity, and downstream utility, with variance
-reporting across five seeds. [TODO~--~finalize the contributions in light
-of what was actually shown.]
 
-\subsection{Answers to Research Questions}
-\begin{itemize}[leftmargin=*]
-  \item \textbf{SQ1 (Interaction definition):} [TODO~--~one paragraph]
-  \item \textbf{SQ2 (Architectural properties):} [TODO~--~one paragraph]
-  \item \textbf{SQ3 (Feasible portfolio):} [TODO~--~one paragraph]
-  \item \textbf{SQ4 (Evaluation protocol):} [TODO~--~one paragraph]
-\end{itemize}
-\noindent
-\textbf{Main RQ:} [TODO~--~one paragraph synthesizing across SQ1--SQ4
-whether and to what extent the constraint-aware autoregressive transformer
-generator produced synthetic interaction logs with high fidelity, validity,
-and downstream utility.]
 
 \subsection{Implications}
-[TODO~--~scientific implications for the RS simulation literature, in
-particular regarding the intersection between transformer sequence
-modeling and synthetic interaction generation. Practical implications for
-the CMI simulator, for downstream researchers using the demonstrator
-pipeline, and for stakeholders concerned about bias inheritance.]
 
 \subsection{Recommendations and Future Work}
-Identified as natural directions for future work:
-\begin{itemize}[leftmargin=*]
-  \item Context feature integration (category, price) into both the input
-    representation and the output schema.
-  \item Comparison against GRU-based and GAN-based generators on the same
-    evaluation protocol.
-  \item Long-horizon feedback-loop simulation embedding the generator in a
-    closed-loop recommender training cycle.
-  \item Cross-domain evaluation beyond retail e-commerce (news, media).
-  \item Online evaluation through live A/B testing of recommenders trained
-    on synthetic data.
-  \item Throughput optimization, including batched generation and
-    speculative decoding strategies.
-\end{itemize}
+
 
 %% =====================================================================
 \begin{acks}
-The author thanks Diptish Dey for supervision throughout this project, the
-CMI research group at AUAS for their feedback during weekly meetings, and
-Synerise for releasing the RecSys 2025 dataset under public challenge terms.
-[TODO~--~personal acknowledgements.]
 \end{acks}
 
 %% =====================================================================
 %% BIBLIOGRAPHY -- carried over verbatim from the research plan.
-\begin{thebibliography}{21}
+\begin{thebibliography}{22}
 
 \bibitem{stavinova2022survey}
 E.~Stavinova, A.~Grigorievskiy, A.~Volodkevich, P.~Chunaev, K.~Bochenina, and D.~Bugaychenko.
@@ -1845,6 +2092,11 @@ J.~Lin.
 Aleksandr V. Petrov and Craig Macdonald.
 \newblock ``Generative Sequential Recommendation with GPTRec.''
 \newblock \emph{arXiv preprint arXiv:2306.11114} (2023).
+
+\bibitem{menon2021longtaillearninglogitadjustment}
+Menon, A.~K., Jayasumana, S., Rawat, A.~S., Jain, H., Veit, A., \& Kumar, S. (2021).
+\newblock Long-tail learning via logit adjustment.
+\newblock \emph{arXiv preprint arXiv:2007.07314}.
 
 \end{thebibliography}
 

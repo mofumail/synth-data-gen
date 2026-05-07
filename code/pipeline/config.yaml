@@ -50,11 +50,12 @@ svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token p
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
 
-eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_290426-16-24-42_ilfa_0.5-cat_logit_1.0
+eval_model: session_transformer_d128_l4_h4
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
 infer_item_temperature: 1.0     # item head (SVD-PQ Hamming score or flat pool softmax)
+infer_pool_temperature: 1.0    # SVD-PQ in-pool softmax (log_prob scorer): smaller -> sharper pool pick
 
 # SVD-PQ inference scorer: how to pick the final in-pool SKU from the t per-dim softmaxes.
 #   hamming  : sample t tokens, rank pool SKUs by count of matching tokens (legacy)
