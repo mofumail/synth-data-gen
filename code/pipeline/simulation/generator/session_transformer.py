@@ -89,8 +89,19 @@ class SessionTransformer(nn.Module):
         svdpq_v: int = 0,                              # bins per dim
         svdpq_label_smoothing: float = 0.0,            # per-dim CE smoothing ε (train-time only)
         pool_temperature: float = 1.0,                 # SVD-PQ in-pool softmax temperature (eval-time)
+        item_head_mode: str = "hier",                  # flat | hier | svdpq
     ):
         super().__init__()
+        if item_head_mode not in {"flat", "hier", "svdpq"}:
+            raise ValueError(
+                f"item_head_mode must be flat|hier|svdpq, got {item_head_mode!r}"
+            )
+        self.item_head_mode = item_head_mode
+        # Iter-1 baseline drops the category entirely (no input emb, no head,
+        # no item-head conditioning). Caller may still pass n_categories for
+        # backward-compat; we override it locally.
+        if item_head_mode == "flat":
+            n_categories = 0
         self.d_model      = d_model
         self.vocab_size   = vocab_size
         self.n_categories = n_categories
@@ -152,9 +163,12 @@ class SessionTransformer(nn.Module):
         # Prediction heads
         self.action_head   = ActionHead(d_model, n_actions)
         self.category_head = CategoryHead(d_model, n_categories) if n_categories > 0 else None
-        # SVD-PQ head when sku_tokens_table is supplied; otherwise flat vocab head.
-        self.svdpq_enabled = sku_tokens_table is not None and svdpq_t > 0
-        if self.svdpq_enabled:
+        # Item head: dispatch on iteration mode.
+        #   flat  -> ItemHead with no category cond, plain K-way softmax (iter 1)
+        #   hier  -> ItemHead with category cond + hierarchical masked CE (iter 2)
+        #   svdpq -> SVDPQItemHead t-way factored softmax (iter 3)
+        self.svdpq_enabled = (item_head_mode == "svdpq")
+        if item_head_mode == "svdpq":
             self.item_head = SVDPQItemHead(
                 d_model, t=svdpq_t, v=svdpq_v,
                 n_categories=n_categories,
@@ -163,6 +177,8 @@ class SessionTransformer(nn.Module):
             if sku_tokens_table is not None:
                 self.item_head.register_sku_tokens(torch.as_tensor(sku_tokens_table, dtype=torch.long))
         else:
+            # n_categories already forced to 0 above for flat mode, so this
+            # builds an ItemHead with category_cond=None and flat_loss is used.
             self.item_head = ItemHead(d_model, vocab_size, n_categories=n_categories)
         self.temporal_head = TemporalHead(d_model, n_temporal_bins)
 
@@ -253,8 +269,12 @@ class SessionTransformer(nn.Module):
         # Sparse: only compute item/category heads at item-bearing positions
         h_item     = h[item_mask]        # [M, d_model]
         tgt_e_item = tgt_e[item_mask]    # [M]
-        tgt_c_item = tgt_c[item_mask]    # [M]
-        category_logits = self.category_head(h_item, tgt_e_item)  # [M, n_cats]
+        # Iter-1 flat mode has no category supervision at all; tgt_c may be None.
+        tgt_c_item = tgt_c[item_mask] if tgt_c is not None else None
+        if self.category_head is not None:
+            category_logits = self.category_head(h_item, tgt_e_item)  # [M, n_cats]
+        else:
+            category_logits = None
         item_ctx = (h_item, tgt_e_item, tgt_c_item)
 
         return action_logits, category_logits, temporal_logits, item_ctx
@@ -366,12 +386,17 @@ class SessionTransformer(nn.Module):
                 sku_out = None
                 if i_idx > 0:
                     sku_out = idx2sku.get(i_idx, i_idx - 1) if idx2sku else i_idx - 1
+                # Iter-1 flat mode emits no category at all.
+                if self.item_head_mode == "flat":
+                    cat_out = None
+                else:
+                    cat_out = int(c_full[b].item()) if is_item[b] else None
                 events_out[b].append({
                     "client_id":  client_ids[b],
                     "event_type": IDX2ACTION[a_idx],
                     "sku":        sku_out,
                     "timestamp":  current_dts[b],
-                    "category": int(c_full[b].item()) if is_item[b] else None,
+                    "category":   cat_out,
                 })
 
             # Append the new token to the growing streams
@@ -464,6 +489,13 @@ class SessionTransformer(nn.Module):
         h_item = h_t[is_item]
         a_item = a_idxs[is_item]
 
+        # Iter-1 flat baseline: no category, sample directly from full-vocab softmax.
+        if self.item_head_mode == "flat":
+            i_idxs[is_item] = self._sample_flat_unrestricted(
+                h_item, a_item, item_temperature,
+            )
+            return i_idxs, c_full
+
         cat_logits = self.category_head(h_item, a_item) / temperature
         # Mask categories with no SKU pool (otherwise we'd emit a PAD-sku event
         # and ValidityLayer would drop the session).
@@ -554,6 +586,23 @@ class SessionTransformer(nn.Module):
                 item_result[m] = pool[int(torch.multinomial(pick_probs, 1).item())]
         return item_result
 
+    def _sample_flat_unrestricted(
+        self,
+        h_item: torch.Tensor,
+        a_item: torch.Tensor,
+        item_temperature: float,
+    ) -> torch.Tensor:
+        """
+        Iter-1 baseline sampling: action-conditioned K-way softmax over the
+        full vocab, no category gating, no pool restriction.
+        """
+        cond = h_item + self.item_head.action_cond(a_item)
+        logits = self.item_head.fc(cond) / max(item_temperature, 1e-6)
+        # SKU index 0 is PAD — never a valid emission.
+        logits[:, 0] = float("-inf")
+        probs = F.softmax(logits.float(), dim=-1)
+        return torch.multinomial(probs, 1).squeeze(1)
+
     def _sample_flat_pool(
         self,
         h_item: torch.Tensor,
@@ -643,6 +692,7 @@ class SessionTransformer(nn.Module):
                 "n_categories":    self.n_categories,
                 "has_price":       self.price_emb is not None,
                 "has_name":        self.name_tok_emb is not None,
+                "item_head_mode":  self.item_head_mode,
                 "svdpq_enabled":   self.svdpq_enabled,
                 "svdpq_t":         self.item_head.t if self.svdpq_enabled else 0,
                 "svdpq_v":         self.item_head.v if self.svdpq_enabled else 0,
@@ -675,9 +725,15 @@ class SessionTransformer(nn.Module):
             except Exception as e:
                 print(f"  [warn] failed to load sku_properties for inference: {e}")
 
+        # Resolve item-head mode with back-compat fallback to legacy `svdpq_enabled`.
+        item_head_mode = cfg.get(
+            "item_head_mode",
+            "svdpq" if cfg.get("svdpq_enabled", False) else "hier",
+        )
+
         # Rebuild SVD-PQ token table (not in state_dict — persistent=False buffer).
         sku_tokens_tbl = None
-        if cfg.get("svdpq_enabled", False):
+        if item_head_mode == "svdpq":
             try:
                 from ingestion.dataset import get_sku_tokens
                 sku_tokens_tbl = get_sku_tokens()
@@ -699,6 +755,7 @@ class SessionTransformer(nn.Module):
             svdpq_t           = cfg.get("svdpq_t", 0),
             svdpq_v           = cfg.get("svdpq_v", 0),
             pool_temperature  = cfg.get("pool_temperature", 1.0),
+            item_head_mode    = item_head_mode,
         )
 
         model._cat_sku_pools = None
@@ -708,7 +765,8 @@ class SessionTransformer(nn.Module):
 
         # Auto-load per-category SKU pools so hierarchical inference actually fires
         # (infer_batch falls back to global top-k when self._cat_sku_pools is None).
-        if cfg.get("n_categories", 0) > 0:
+        # Iter-1 flat mode has no category structure -> skip pool loading.
+        if item_head_mode != "flat" and cfg.get("n_categories", 0) > 0:
             try:
                 from config import CAT_SKU_POOLS_PATH
                 import joblib as _jl

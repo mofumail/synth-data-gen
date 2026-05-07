@@ -37,6 +37,7 @@ from config import (
     TRAIN_LR, TRAIN_D_MODEL, TRAIN_N_LAYERS, TRAIN_N_HEADS,
     TRAIN_MAX_SESSIONS, TRAIN_NUM_WORKERS, TRAIN_PATIENCE,
     N_CATEGORIES, CAT2IDX_PATH, OUTPUT_DIR,
+    ITEM_HEAD_MODE,
     SVDPQ_ENABLED, SVDPQ_T, SVDPQ_V, SVDPQ_LABEL_SMOOTHING,
     ITEM_LOSS_FREQ_WEIGHT_ALPHA, CAT_LOGIT_ADJ_TAU,
     IS_BEST_EVAL_ENABLED, IS_BEST_EVAL_EVERY_N_EPOCHS,
@@ -199,8 +200,9 @@ def train(comment: str | None = None):
     # B. Category-head logit adjustment prior.
     #    train_logits = raw_logits + tau * log(prior). Built from cached
     #    categories.npy (item-bearing positions only — index 0 is PAD).
+    #    Iter-1 flat mode has no category supervision -> skip entirely.
     cat_logit_adj = None
-    if CAT_LOGIT_ADJ_TAU > 0.0:
+    if CAT_LOGIT_ADJ_TAU > 0.0 and ITEM_HEAD_MODE != "flat":
         cat_flat = np.asarray(gen.dataset._categories_flat)   # mmap'd; bincount realizes it
         cat_counts = np.bincount(cat_flat, minlength=N_CATEGORIES).astype(np.float64)
         cat_counts[0] = 0.0                                   # PAD is never a target
@@ -238,6 +240,7 @@ def train(comment: str | None = None):
         svdpq_t=SVDPQ_T if SVDPQ_ENABLED else 0,
         svdpq_v=SVDPQ_V if SVDPQ_ENABLED else 0,
         svdpq_label_smoothing=SVDPQ_LABEL_SMOOTHING if SVDPQ_ENABLED else 0.0,
+        item_head_mode=ITEM_HEAD_MODE,
     ).to(device)
     # Capture the uncompiled item_head BEFORE torch.compile so its .loss /
     # .hierarchical_loss reaches the real module rather than going through the
@@ -247,9 +250,10 @@ def train(comment: str | None = None):
         item_head.register_sku_tokens(
             torch.as_tensor(sku_tokens, dtype=torch.long, device=device)
         )
-    #test
-    else:
+    elif ITEM_HEAD_MODE == "hier":
         item_head.register_sku_cat_map(cat_sku_pools_tensors, VOCAB_K)
+    # ITEM_HEAD_MODE == "flat": flat ItemHead has no sku_cat / category_cond,
+    # uses ItemHead.flat_loss(). Nothing to register.
     # torch.compile disabled: hits an inductor tiling_utils assertion on this
     # model graph (PyTorch bug, not ours). bf16 alone is fast enough here.
     # model = torch.compile(model, dynamic=True)
@@ -357,11 +361,15 @@ def train(comment: str | None = None):
 
                 if item_valid.any():
                     h_item, tgt_e_item, tgt_c_item = item_ctx
-                    cat_logits_for_loss = (
-                        category_logits + cat_logit_adj
-                        if cat_logit_adj is not None else category_logits
-                    )
-                    category_loss = F.cross_entropy(cat_logits_for_loss, tgt_categories[item_valid])
+                    if category_logits is not None:
+                        cat_logits_for_loss = (
+                            category_logits + cat_logit_adj
+                            if cat_logit_adj is not None else category_logits
+                        )
+                        category_loss = F.cross_entropy(cat_logits_for_loss, tgt_categories[item_valid])
+                    else:
+                        # Iter-1 flat: no category head, no category loss.
+                        category_loss = torch.zeros((), device=device)
                     item_targets = tgt_items[item_valid]
                     sample_w = (
                         item_freq_weights[item_targets]
@@ -470,11 +478,14 @@ def train(comment: str | None = None):
 
                     if item_valid.any():
                         h_item, tgt_e_item, tgt_c_item = val_item_ctx
-                        val_cat_logits = (
-                            category_logits + cat_logit_adj
-                            if cat_logit_adj is not None else category_logits
-                        )
-                        val_cat_loss  = F.cross_entropy(val_cat_logits, tgt_categories[item_valid])
+                        if category_logits is not None:
+                            val_cat_logits = (
+                                category_logits + cat_logit_adj
+                                if cat_logit_adj is not None else category_logits
+                            )
+                            val_cat_loss  = F.cross_entropy(val_cat_logits, tgt_categories[item_valid])
+                        else:
+                            val_cat_loss  = torch.zeros((), device=device)
                         val_item_targets = tgt_items[item_valid]
                         val_sample_w = (
                             item_freq_weights[val_item_targets]

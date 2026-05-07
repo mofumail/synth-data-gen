@@ -179,9 +179,27 @@ class ItemHead(nn.Module):
         per = F.cross_entropy(logits, sku_ids, reduction='none')         # [M]
         return (per * sample_weights).sum() / sample_weights.sum().clamp_min(1e-12)
 
-    # Polymorphic alias so train.py can call item_head.loss(...) for both
-    # ItemHead (flat hierarchical) and SVDPQItemHead (token factored) uniformly.
+    def flat_loss(
+        self,
+        h_t: torch.Tensor,
+        action_t: torch.Tensor,
+        sku_ids: torch.Tensor,
+        sample_weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Iter-1 baseline: plain CE over the full vocab, action-conditioned only."""
+        cond = h_t + self.action_cond(action_t)
+        logits = self.fc(cond)
+        if sample_weights is None:
+            return F.cross_entropy(logits, sku_ids)
+        per = F.cross_entropy(logits, sku_ids, reduction='none')
+        return (per * sample_weights).sum() / sample_weights.sum().clamp_min(1e-12)
+
+    # Polymorphic alias so train.py can call item_head.loss(...) for all three
+    # iterations uniformly. When category_cond is None we're in the iter-1
+    # flat baseline (no category at all) and dispatch to flat_loss.
     def loss(self, h_t, action_t, category_t, sku_ids, sample_weights=None):
+        if self.category_cond is None:
+            return self.flat_loss(h_t, action_t, sku_ids, sample_weights)
         return self.hierarchical_loss(h_t, action_t, category_t, sku_ids, sample_weights)
 
 

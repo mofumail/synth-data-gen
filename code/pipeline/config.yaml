@@ -40,6 +40,14 @@ train_patience:     5          # in TSTR mode: probes (not epochs) without HR im
 category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token, based on notbooks/cat_rare_treshhold.py
 # This one doesn't really matter, SKu coverage numbers are tiny across the board, treshhold 50 only collapses 3.5% of SKUs
 
+# Item head iteration:
+#   flat  - Iter 1 baseline: K-way softmax over full vocab, no category at all
+#   hier  - Iter 2: hierarchical category -> in-category masked CE
+#   svdpq - Iter 3: SVD product-quantized factored softmax
+# `svdpq_enabled` below is kept as a back-compat alias and is auto-derived
+# from this mode in config.py.
+item_head_mode:         flat
+
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
 svdpq_enabled:          true
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16

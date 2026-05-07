@@ -72,8 +72,19 @@ TRAIN_PATIENCE     = _cfg.get("train_patience")   # None = early stopping disabl
 #Category head (hierarchical item loss)
 CATEGORY_RARE_THRESHOLD = _cfg["category_rare_threshold"]
 
+#Item head iteration: flat | hier | svdpq.
+#Defaults to back-compat derivation from `svdpq_enabled` so older configs work.
+ITEM_HEAD_MODE = _cfg.get(
+    "item_head_mode",
+    "svdpq" if _cfg.get("svdpq_enabled", False) else "hier",
+)
+if ITEM_HEAD_MODE not in {"flat", "hier", "svdpq"}:
+    raise ValueError(
+        f"item_head_mode must be one of flat|hier|svdpq, got {ITEM_HEAD_MODE!r}"
+    )
+
 #SVD-PQ item tokenizer
-SVDPQ_ENABLED          = _cfg["svdpq_enabled"]
+SVDPQ_ENABLED          = (ITEM_HEAD_MODE == "svdpq")
 SVDPQ_T                = _cfg["svdpq_t"]
 SVDPQ_V                = _cfg["svdpq_v"]
 SVDPQ_BINNING          = _cfg["svdpq_binning"]
@@ -153,7 +164,10 @@ N_CATEGORIES = _load_n_categories()
 # Derived unique model name used for checkpoint and config snapshot filenames.
 # Changing d_model or n_layers in config.yaml automatically routes to a different
 # file so ablation variants never overwrite each other.
-_MODEL_VARIANT = f"svdpq_t{SVDPQ_T}v{SVDPQ_V}" if SVDPQ_ENABLED else "hier"
+if ITEM_HEAD_MODE == "svdpq":
+    _MODEL_VARIANT = f"svdpq_t{SVDPQ_T}v{SVDPQ_V}"
+else:
+    _MODEL_VARIANT = ITEM_HEAD_MODE   # "flat" or "hier"
 MODEL_NAME   = f"session_transformer_d{TRAIN_D_MODEL}_l{TRAIN_N_LAYERS}_h{TRAIN_N_HEADS}_{_MODEL_VARIANT}"
 MODEL_SUBDIR = MODEL_DIR / MODEL_NAME   # output/models/<name>/
 
