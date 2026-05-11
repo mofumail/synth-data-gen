@@ -61,13 +61,13 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 - 💻 [Code Repository](./code/)
 
 **Wiki Navigatie:**
-- 📅 [Planning en Voortgang](../../wikis/Planning-en-Voortgang)
-- 🔬 [Onderzoek](../../wikis/Onderzoek)
-- 🎨 [Ontwerp](../../wikis/Ontwerp-en-Uitwerking)
-- 💻 [Ontwikkeling](../../wikis/Ontwikkeling)
-- 📊 [Evaluatie](../../wikis/Evaluatie-en-Validatie)
-- 🔄 [Feedback & Iteratie](../../wikis/Feedback-en-Iteratie)
-- 🤔 [Zelfreflectie](../../wikis/Zelfreflectie-Leeruitkomsten)
+- 📅 [Planning en Voortgang](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/Planning-en-Voortgang)
+- 🔬 [Onderzoek](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/Onderzoek)
+- 🎨 [Ontwerp](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/Ontwerp)
+- 💻 [Ontwikkeling](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/Ontwikkeling)
+- 📊 [Evaluatie](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/Evaluatie)
+- 🔄 [Feedback & Iteratie](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/Feedback-&-Iteratie)
+- 🤔 [Zelfreflectie](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/Zelfreflectie)
 - 🤖 [GenAI Gebruik](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/GenAI-Gebruik)
 
 
