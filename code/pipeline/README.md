@@ -13,9 +13,8 @@ Pipeline (run from code/pipeline/):
         --num-seeds  <int>   number of seeds (default 5)   
         and other flags, but upper 2 are most important
 
-MODEL_NAME takes t, v as input, so all 3 runs should land in disjoint folders
-and not overwrite each other
 
-  - output/models/session_transformer_d128_l4_h4_svdpq_t4v512/                             
-  - output/models/session_transformer_d128_l4_h4_svdpq_t8v256/
-  - output/models/session_transformer_d128_l4_h4_svdpq_t4v2048/  
+    An easier way to run it is with :
+    uv run python main.py --from "stage" (train, evaluate etc)" with whatever relevant flag you'd want to pass through (--n-sessions, --num-seeds) This runs the entire pipeline end-to-end without having to manually start the next stage.
+
+Output folder names are based on hyperparams & datetime when running the script. Add run flag --comment to add an extra bit of text to the output folder name.
