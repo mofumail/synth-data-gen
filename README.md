@@ -68,7 +68,7 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 - 📊 [Evaluatie](../../wikis/Evaluatie-en-Validatie)
 - 🔄 [Feedback & Iteratie](../../wikis/Feedback-en-Iteratie)
 - 🤔 [Zelfreflectie](../../wikis/Zelfreflectie-Leeruitkomsten)
-- 🤖 [GenAI Gebruik](../../wikis/GenAI-Gebruik)
+- 🤖 [GenAI Gebruik](https://gitlab.fdmci.hva.nl/maai/2025-2026-sem2/centre-for-market-insights/beau-min-maai-portfolio/-/wikis/GenAI-Gebruik)
 
 
 ---
