@@ -62,10 +62,18 @@ Dit portfolio bevat werk gemaakt in het kader van de **Master Applied Artificial
 
 **Wiki Navigatie:**
 - 📅 [Planning en Voortgang](../../wikis/Planning-en-Voortgang)
+- 🔬 [Onderzoek](../../wikis/Onderzoek)
+- 🎨 [Ontwerp](../../wikis/Ontwerp-en-Uitwerking)
+- 💻 [Ontwikkeling](../../wikis/Ontwikkeling)
+- 📊 [Evaluatie](../../wikis/Evaluatie-en-Validatie)
+- 🔄 [Feedback & Iteratie](../../wikis/Feedback-en-Iteratie)
+- 🤔 [Zelfreflectie](../../wikis/Zelfreflectie-Leeruitkomsten)
+- 🤖 [GenAI Gebruik](../../wikis/GenAI-Gebruik)
+
 
 ---
 
-*Laatste update: 13-03-2026*  
-*Portfolio versie: 0.2*
+*Laatste update: 11-05-2026*  
+*Portfolio versie: 0.3*
 
 **Status:** ⚪ In ontwikkeling 
