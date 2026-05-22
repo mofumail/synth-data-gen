@@ -163,6 +163,26 @@ class GRU4RecAdapter(RecSysAdapter):
         if not sequences:
             return
 
+        # --- Diagnostic: session length distribution (printed BEFORE any GPU
+        # allocation so it survives a downstream OOM in backward). ---
+        _lens = sorted((len(s) for s in sequences), reverse=True)
+        _n    = len(_lens)
+        _p    = lambda q: _lens[min(_n - 1, int(_n * (1 - q)))]
+        print(
+            f"  [{label}] session-len: n={_n:,}  max={_lens[0]}  "
+            f"p99.9={_p(0.999)}  p99={_p(0.99)}  p95={_p(0.95)}  "
+            f"p50={_lens[_n // 2]}  top10={_lens[:10]}",
+            flush=True,
+        )
+
+        # Cap session length: bounds the [B, T, V] forward/backward peak so a
+        # single bot-like outlier session can't OOM TRTR. p99.9 is ~38 across
+        # seeds, so 200 leaves a wide margin above any realistic shopper and
+        # truncates only a handful of extreme outliers (e.g. one 479-event
+        # session in seed 43).
+        _SEQ_LEN_CAP = 200
+        sequences = [s[:_SEQ_LEN_CAP] for s in sequences]
+
         # --- Pad sequences and build dataset ---
         max_len  = max(len(s) for s in sequences)
         padded   = torch.zeros(len(sequences), max_len, dtype=torch.long)
@@ -192,7 +212,7 @@ class GRU4RecAdapter(RecSysAdapter):
                                   pin_memory=True, num_workers=2, persistent_workers=True) if val_ds else None
 
         # --- Model + optimiser + scheduler ---
-        self._model = torch.compile(_GRU4RecModel(n_items, self.embed_dim, self.hidden_dim).to(self.device))
+        self._model = _GRU4RecModel(n_items, self.embed_dim, self.hidden_dim).to(self.device)
         optimizer   = torch.optim.Adam(self._model.parameters(), lr=self.lr)
         scheduler   = ReduceLROnPlateau(optimizer, factor=self.lr_factor, patience=self.lr_patience)
 
@@ -281,6 +301,18 @@ class GRU4RecAdapter(RecSysAdapter):
             self._model = None
         gc.collect()
         torch.cuda.empty_cache()
+
+    def to_cpu(self) -> None:
+        """Park trained model on CPU and release GPU memory."""
+        if self._model is not None:
+            self._model.cpu()
+        gc.collect()
+        torch.cuda.empty_cache()
+
+    def to_device(self) -> None:
+        """Restore parked model to GPU for prediction."""
+        if self._model is not None:
+            self._model.to(self.device)
 
     def _sessions_to_sequences(self, interactions: List[List[dict]]) -> List[List[int]]:
         """Convert sessions to local-index item sequences (item-bearing events only)."""
@@ -429,6 +461,11 @@ class DownstreamEvaluator:
                 )
                 print(f"    Saved GRU4Rec -> {self.save_dir / fname}", flush=True)
 
+            # Park finished adapter on CPU so subsequent fits don't OOM the GPU
+            # with prior adapters' weights + Adam state sitting resident.
+            if hasattr(adapter, "to_cpu"):
+                adapter.to_cpu()
+
         # --- Build shared vocabulary from the reference condition ---
         ref_adapter = adapters.get(reference_cond)
         if ref_adapter is None:
@@ -459,6 +496,10 @@ class DownstreamEvaluator:
             if not shared_pairs:
                 results.append(UtilityResult(condition=condition, hr_at_k=0.0, ndcg_at_k=0.0, oov_rate=oov_rate))
                 continue
+
+            # Bring this adapter back to GPU just for its predict loop.
+            if hasattr(adapter, "to_device"):
+                adapter.to_device()
 
             hr_list, ndcg_list = [], []
             for context, ground_truth_sku in shared_pairs:

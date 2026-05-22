@@ -46,7 +46,7 @@ category_rare_threshold: 5   # categories with <= this many SKUs are collapsed t
 #   svdpq - Iter 3: SVD product-quantized factored softmax
 # `svdpq_enabled` below is kept as a back-compat alias and is auto-derived
 # from this mode in config.py.
-item_head_mode:         flat
+item_head_mode:         svdpq
 
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
 svdpq_enabled:          true
@@ -58,7 +58,7 @@ svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token p
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
 
-eval_model: session_transformer_d128_l4_h4
+eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_210526-12-12-18_iter3_svdpq_base_200k
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
@@ -103,8 +103,8 @@ loss_weights:        [1.0, 1.0, 1.0, 1.0]
 # B : Menon et al. 2021 logit adjustment on the category CE loss.
 #     train_logits = raw_logits + tau * log(category_prior).
 #     0.0 = off.  1.0 = Bayes-optimal correction for class imbalance.
-item_loss_freq_weight_alpha: 0.5 # 0.5
-cat_logit_adj_tau:           1.0 # 1.0
+item_loss_freq_weight_alpha: 0.0 # 0.5
+cat_logit_adj_tau:           0.0 # 1.0
 
 # In-training TSTR-T probe (drives is_best checkpoint selection).
 # When enabled, every is_best_eval_every_n_epochs the model is frozen,

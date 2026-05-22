@@ -95,6 +95,12 @@ class EvaluationOrchestrator:
             )
             seed_results.append(result)
 
+            # Routine per-seed GPU teardown.
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            print(f"  GPU after seed {seed}: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated", flush=True)
+
         correlations = self.compute_fidelity_utility_correlation(seed_results)
         aggregated   = self._aggregate(seed_results, correlations)
         return aggregated
@@ -373,13 +379,17 @@ class EvaluationOrchestrator:
                     break
 
         fidelity_metrics = {
-            "jsd_action":            [r.fidelity_train.jsd_action            for r in seed_results],
-            "ks_session_length":     [r.fidelity_train.ks_session_length     for r in seed_results],
-            "ks_temporal_delta":     [r.fidelity_train.ks_temporal_delta     for r in seed_results],
-            "l1_action_bigrams":     [r.fidelity_train.l1_action_bigrams     for r in seed_results],
-            "l1_item_bigrams":       [r.fidelity_train.l1_item_bigrams       for r in seed_results],
-            "sample_diversity":      [r.fidelity_train.sample_diversity      for r in seed_results],
-            "conversion_rate_delta": [r.fidelity_train.conversion_rate_delta for r in seed_results],
+            "jsd_action":             [r.fidelity_train.jsd_action             for r in seed_results],
+            "ks_session_length":      [r.fidelity_train.ks_session_length      for r in seed_results],
+            "ks_temporal_delta":      [r.fidelity_train.ks_temporal_delta      for r in seed_results],
+            "l1_action_bigrams":      [r.fidelity_train.l1_action_bigrams      for r in seed_results],
+            "l1_item_bigrams":        [r.fidelity_train.l1_item_bigrams        for r in seed_results],
+            "sample_diversity":       [r.fidelity_train.sample_diversity       for r in seed_results],
+            "conversion_rate_delta":  [r.fidelity_train.conversion_rate_delta  for r in seed_results],
+            "cart_abandonment_delta": [r.fidelity_train.cart_abandonment_delta for r in seed_results],
+            "item_coverage":          [r.fidelity_train.bias.item_coverage          for r in seed_results],
+            "popularity_jsd":         [r.fidelity_train.bias.popularity_jsd         for r in seed_results],
+            "gini_coefficient_delta": [r.fidelity_train.bias.gini_coefficient_delta for r in seed_results],
         }
 
         results = []
