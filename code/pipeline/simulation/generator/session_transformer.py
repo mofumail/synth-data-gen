@@ -651,6 +651,157 @@ class SessionTransformer(nn.Module):
         d_probs  = F.softmax(d_logits.float(), dim=-1)
         return torch.multinomial(d_probs, 1).squeeze(1)
 
+    # Top-K recommendation baskets (read the item distribution, don't roll out)
+
+    @torch.no_grad()
+    def score_basket_batch(
+        self,
+        batch_inputs: List[tuple],   # [(client_id, sku, start_dt, history), ...]
+        k: int = 20,
+        rec_action_idx: Optional[int] = None,
+        top_c: int = 100,
+        item_temperature: float = 1.0,
+    ) -> List[List[dict]]:
+        """
+        Return the top-K most probable SKUs per user as a ranked basket.
+
+        Unlike infer_batch (which samples a behavioral trajectory and yields
+        ~1-2 item-bearing events), this reads the model's item marginal
+        log p(sku) at step 0  given the user's history and conditioned on a
+        "recommend" action  and takes the K highest-scoring items. E
+
+        Dispatch on item_head_mode:
+            flat  = global top-K over the fc logits (no category).
+            hier  = joint log p(cat) + log p(sku|cat), top-K across top-C cats.
+            svdpq = same joint, factored per-SKU score.
+
+        Returns one list per input: [{client_id, sku, score, rank}, ...].
+        """
+        self.eval()
+        device  = next(self.parameters()).device
+        B       = len(batch_inputs)
+        idx2sku = getattr(self, "_idx2sku", {})
+        if rec_action_idx is None:
+            rec_action_idx = ACTION2IDX["add_to_cart"]
+
+        autocast_ctx = (
+            torch.autocast("cuda", dtype=torch.bfloat16)
+            if device.type == "cuda"
+            else torch.autocast("cpu", enabled=False)
+        )
+
+        with autocast_ctx:
+            memory = self._encode_batch_memories(batch_inputs, device)
+            tok_e, tok_i, tok_d, tok_c, client_ids, _ = self._seed_tokens(batch_inputs, device)
+            pos = torch.arange(1, device=device).unsqueeze(0)            # [1, 1]
+            x   = self._build_input(tok_e, tok_i, tok_d, tok_c, pos)     # [B, 1, d]
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(1, device=device)
+            h   = self.decoder(x, memory, tgt_mask=tgt_mask, tgt_is_causal=True)
+            h0  = h[:, -1, :]                                            # [B, d_model]
+
+            a_idxs = torch.full((B,), rec_action_idx, dtype=torch.long, device=device)
+            if self.item_head_mode == "flat":
+                top_idx, top_score = self._score_flat(h0, a_idxs, k, item_temperature)
+            else:
+                top_idx, top_score = self._score_pool_joint(h0, a_idxs, k, top_c, item_temperature)
+
+        idx_list   = top_idx.cpu().tolist()
+        score_list = top_score.float().cpu().tolist()
+        out: List[List[dict]] = [[] for _ in range(B)]
+        for b in range(B):
+            for rank, (i_idx, sc) in enumerate(zip(idx_list[b], score_list[b])):
+                if i_idx <= 0:
+                    continue
+                sku_out = idx2sku.get(i_idx, i_idx - 1) if idx2sku else i_idx - 1
+                out[b].append({
+                    "client_id": client_ids[b],
+                    "sku":       sku_out,
+                    "score":     sc,
+                    "rank":      rank,
+                })
+        return out
+
+    def _score_flat(
+        self,
+        h0: torch.Tensor,
+        a_idxs: torch.Tensor,
+        k: int,
+        item_temperature: float,
+    ):
+        """flat mode: global top-K over the action-conditioned fc logits."""
+        cond   = h0 + self.item_head.action_cond(a_idxs)
+        logits = self.item_head.fc(cond) / max(item_temperature, 1e-6)   # [B, V]
+        logits[:, 0] = float("-inf")                                     # PAD
+        logp   = F.log_softmax(logits.float(), dim=-1)
+        kk     = min(k, logp.size(1))
+        top_score, top_idx = logp.topk(kk, dim=-1)
+        return top_idx, top_score
+
+    def _score_pool_joint(
+        self,
+        h0: torch.Tensor,
+        a_idxs: torch.Tensor,
+        k: int,
+        top_c: int,
+        item_temperature: float,
+    ):
+        """
+        hier / svdpq: rank categories by log p(cat) (empty pools masked), score
+        SKUs in the top-C pools as log p(cat) + log p(sku|cat), then take the
+        global top-K per user across those pools.
+        """
+        B      = h0.size(0)
+        device = h0.device
+        inv_T  = 1.0 / max(item_temperature, 1e-6)
+
+        cat_logits = self.category_head(h0, a_idxs).float()              # [B, n_cats]
+        if hasattr(self, "empty_cat_mask"):
+            cat_logits = cat_logits.masked_fill(self.empty_cat_mask.unsqueeze(0), float("-inf"))
+        cat_logp = F.log_softmax(cat_logits, dim=-1)                     # [B, n_cats]
+
+        c_take = min(top_c, cat_logp.size(1))
+        top_cat_logp, top_cat_idx = cat_logp.topk(c_take, dim=-1)        # [B, C]
+
+        pools    = self._cat_sku_pools
+        is_svdpq = isinstance(self.item_head, SVDPQItemHead)
+        cat_list = top_cat_idx.cpu().tolist()
+
+        out_idx   = torch.zeros(B, k, dtype=torch.long, device=device)
+        out_score = torch.full((B, k), float("-inf"), device=device)
+
+        for b in range(B):
+            sku_buf, score_buf = [], []
+            hb = h0[b:b + 1]
+            ab = a_idxs[b:b + 1]
+            for j, ci in enumerate(cat_list[b]):
+                pool = pools[ci] if pools is not None and ci < len(pools) else None
+                if pool is None or pool.numel() == 0:
+                    continue
+                c_t = torch.tensor([ci], device=device)
+                if is_svdpq:
+                    cond   = self.item_head._cond(hb, ab, c_t)
+                    logits = self.item_head.fc(cond).view(-1, self.item_head.t, self.item_head.v)
+                    logp   = F.log_softmax(logits.float() * inv_T, dim=-1)   # [1, t, v]
+                    pool_tokens = self.item_head.sku_tokens[pool]            # [P, t]
+                    sku_logp = logp[0].gather(1, pool_tokens.T).sum(dim=0) / self.item_head.t
+                else:
+                    cond   = hb + self.item_head.action_cond(ab) + self.item_head.category_cond(c_t)
+                    w_pool = self.item_head.fc.weight.index_select(0, pool)
+                    b_pool = self.item_head.fc.bias.index_select(0, pool)
+                    logits = (cond @ w_pool.t() + b_pool) * inv_T            # [1, P]
+                    sku_logp = F.log_softmax(logits.float(), dim=-1)[0]      # [P]
+                sku_buf.append(pool)
+                score_buf.append(top_cat_logp[b, j] + sku_logp)
+            if not sku_buf:
+                continue
+            all_sku   = torch.cat(sku_buf)
+            all_score = torch.cat(score_buf)
+            kk = min(k, all_sku.numel())
+            top_s, top_i = all_score.topk(kk)
+            out_idx[b, :kk]   = all_sku[top_i]
+            out_score[b, :kk] = top_s
+        return out_idx, out_score
+
     # Checkpoint I/O
 
     def set_cat_sku_pools(self, cat_sku_pools: list, device) -> None:

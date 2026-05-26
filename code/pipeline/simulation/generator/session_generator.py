@@ -7,16 +7,13 @@ Implements GeneratorInterface for use by the EvaluationOrchestrator.
 Pickling note: SessionGenerator is called inside multiprocessing workers by
 SimulationOrchestrator. Keep state minimal - no open file handles. The model
 is loaded lazily on first use inside the worker process.
-
-See: mermaid/new/PROPOSED_Level3.md
-     mermaid/new/PROPOSED_SLC1.md
-     mermaid/Level4_EvaluationModule.md (GeneratorInterface)
 """
 
 from __future__ import annotations
 
 import random
-from typing import Dict, List, Optional
+import sys
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -110,6 +107,33 @@ class SessionGenerator:
         import joblib
         self._sampler = joblib.load(self.identity_sampler_path)
 
+    def _sample_identities(self, n: int) -> List[dict]:
+        """
+        Draw identity records from whichever sampler object is stored on disk.
+
+
+        """
+        if self._sampler is None:
+            return []
+        if hasattr(self._sampler, "generate_identities"):
+            return list(self._sampler.generate_identities(n))
+        if hasattr(self._sampler, "generate_identity"):
+            return [self._sampler.generate_identity() for _ in range(n)]
+        if isinstance(self._sampler, dict):
+            client_ids = self._sampler.get("client_ids")
+            skus = self._sampler.get("skus")
+            weights = self._sampler.get("weights")
+            if client_ids is None or skus is None or weights is None:
+                raise RuntimeError("identity sampler dict is missing client_ids/skus/weights")
+            idxs = np.random.choice(len(client_ids), size=n, p=weights)
+            return [
+                {"client_id": int(client_ids[i]), "sku": int(skus[i])}
+                for i in idxs
+            ]
+        raise RuntimeError(
+            f"unsupported identity sampler type: {type(self._sampler).__name__}"
+        )
+
     # Single-session inference
 
     def generate_session(
@@ -167,6 +191,175 @@ class SessionGenerator:
         """Clear accumulated user history. Call between evaluation seeds."""
         self._user_registry.clear()
 
+    def _build_batch_inputs(
+        self,
+        n_sessions: int,
+        seed: int,
+        *,
+        unique_users: bool = False,
+    ) -> List[tuple]:
+        """
+        Build the (client_id, sku, start_dt, history) tuples consumed by
+        SessionTransformer.infer_batch / score_basket_batch. Identities come
+        from the CTGAN sampler when available, else random ints; start times
+        spread over a 30-day window; history pulled from the per-user registry.
+        """
+        if self._sampler is None and self.identity_sampler_path is not None:
+            self._load_sampler()
+
+        rng_py = random.Random(seed)
+        rng_np = np.random.default_rng(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        start_base = pd.Timestamp(DS_START)
+        window_s   = 30 * 24 * 3600
+
+        CTGAN_CHUNK = 50_000
+        if self._sampler is not None:
+            identities: list = []
+            seen_cids: set[int] = set()
+            max_draws = max(n_sessions * 50, n_sessions + 10_000) if unique_users else n_sessions
+            drawn = 0
+            pbar_total = (n_sessions + CTGAN_CHUNK - 1) // CTGAN_CHUNK
+            with tqdm(total=pbar_total, desc="  Identity sampling", unit="chunk",
+                      file=sys.stdout) as pbar:
+                while len(identities) < n_sessions:
+                    remaining = n_sessions - len(identities)
+                    n_chunk = min(CTGAN_CHUNK, remaining if not unique_users else max(remaining * 2, 1024))
+                    sampled = self._sample_identities(n_chunk)
+                    drawn += len(sampled)
+                    for ident in sampled:
+                        cid = int(ident["client_id"])
+                        if unique_users and cid in seen_cids:
+                            continue
+                        seen_cids.add(cid)
+                        identities.append(ident)
+                        if len(identities) >= n_sessions:
+                            break
+                    pbar.update(1)
+                    if drawn >= max_draws and len(identities) < n_sessions:
+                        raise RuntimeError(
+                            f"could only sample {len(identities):,} unique users after "
+                            f"{drawn:,} identity draws. Use fewer users or the train "
+                            f"basket input source."
+                        )
+        else:
+            identities = None
+
+        batch_inputs: List[tuple] = []
+        for idx in tqdm(range(n_sessions), desc="  Building inputs", unit="sess",
+                        miniters=max(1, n_sessions // 100), file=sys.stdout):
+            if identities is not None:
+                cid  = identities[idx]["client_id"]
+                item = identities[idx]["sku"]
+            else:
+                while True:
+                    cid = int(rng_np.integers(1, 10_000_000))
+                    if not unique_users or cid not in self._user_registry:
+                        break
+                if unique_users:
+                    self._user_registry.setdefault(cid, [])
+                item = int(rng_np.integers(0, VOCAB_K))
+
+            offset_s = rng_py.randint(0, window_s)
+            start_dt = start_base + pd.Timedelta(seconds=offset_s)
+            past     = self._user_registry.get(cid)
+            history  = past[-HISTORY_WINDOW:] if past else None
+            batch_inputs.append((cid, item, start_dt, history))
+        return batch_inputs
+
+    def score_baskets_for_inputs(
+        self,
+        batch_inputs: Sequence[tuple],
+        k: int = 20,
+        rec_action: str = "add_to_cart",
+        top_c: int = 100,
+    ) -> List[List[dict]]:
+        """Top-K recommendation baskets for explicit pre-built user inputs."""
+        from simulation.generator.heads import ACTION2IDX
+        if self._model is None:
+            self._load_model()
+        if rec_action not in ACTION2IDX:
+            raise ValueError(
+                f"rec_action must be one of {sorted(ACTION2IDX)}, got {rec_action!r}"
+            )
+
+        baskets: List[List[dict]] = []
+        for start in range(0, len(batch_inputs), self.batch_size):
+            chunk = list(batch_inputs[start : start + self.batch_size])
+            baskets.extend(
+                self._model.score_basket_batch(
+                    chunk,
+                    k=k,
+                    rec_action_idx=ACTION2IDX[rec_action],
+                    top_c=top_c,
+                    item_temperature=self.item_temperature,
+                )
+            )
+        return baskets
+
+    def score_baskets(
+        self,
+        n_users: int,
+        seed: int,
+        k: int = 20,
+        rec_action: str = "add_to_cart",
+        top_c: int = 100,
+    ) -> List[List[dict]]:
+        """
+        Top-K recommendation baskets: read the item-head distribution at step 0
+        and return the k most probable SKUs per user (no rollout, exactly k).
+
+        Returns one list of {client_id, sku, score, rank} dicts per user.
+        """
+        from simulation.generator.heads import ACTION2IDX
+        if self._model is None:
+            self._load_model()
+        if rec_action not in ACTION2IDX:
+            raise ValueError(
+                f"rec_action must be one of {sorted(ACTION2IDX)}, got {rec_action!r}"
+            )
+        batch_inputs = self._build_batch_inputs(n_users, seed, unique_users=True)
+        return self.score_baskets_for_inputs(batch_inputs, k=k, rec_action=rec_action, top_c=top_c)
+
+    def generate_from_inputs(
+        self,
+        batch_inputs: Sequence[tuple],
+        seed: int,
+        apply_constraints: bool = True,
+    ) -> List[List[dict]]:
+        """Generate sessions from explicit pre-built user inputs."""
+        if self._model is None:
+            self._load_model()
+
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+
+        sessions: List[List[dict]] = []
+        n_batches = (len(batch_inputs) + self.batch_size - 1) // self.batch_size
+        for start in tqdm(range(0, len(batch_inputs), self.batch_size), total=n_batches,
+                          desc="  Transformer gen", unit="batch", leave=True, file=sys.stdout):
+            chunk = list(batch_inputs[start : start + self.batch_size])
+            results = self._model.infer_batch(
+                chunk,
+                temperature=self.temperature,
+                item_temperature=self.item_temperature,
+                svdpq_scorer=self.svdpq_scorer,
+                pool_temperature=self.pool_temperature,
+            )
+            if apply_constraints:
+                results = [
+                    s if (s and self.validity_layer.validate(s)) else []
+                    for s in results
+                ]
+            for (cid, _, _, _), session in zip(chunk, results):
+                if session:
+                    self._user_registry.setdefault(cid, []).extend(session)
+            sessions.extend(results)
+        return sessions
+
     # GeneratorInterface - used by EvaluationOrchestrator
 
     def generate(
@@ -192,47 +385,8 @@ class SessionGenerator:
         """
         if self._model is None:
             self._load_model()
-        if self._sampler is None and self.identity_sampler_path is not None:
-            self._load_sampler()
 
-        rng_py  = random.Random(seed)
-        rng_np  = np.random.default_rng(seed)
-        torch.manual_seed(seed)
-
-        # Spread session start times uniformly over a 30-day window
-        start_base = pd.Timestamp(DS_START)
-        window_s   = 30 * 24 * 3600
-
-        import sys
-
-        # Sample identities — chunked so tqdm shows progress (CTGAN can be slow at 1M+)
-        CTGAN_CHUNK = 50_000
-        if self._sampler is not None:
-            identities: list = []
-            n_chunks = (n_sessions + CTGAN_CHUNK - 1) // CTGAN_CHUNK
-            for c_start in tqdm(range(0, n_sessions, CTGAN_CHUNK), total=n_chunks,
-                                desc="  CTGAN sampling", unit="chunk", file=sys.stdout):
-                n_chunk = min(CTGAN_CHUNK, n_sessions - c_start)
-                identities.extend(self._sampler.generate_identities(n_chunk))
-        else:
-            identities = None
-
-        # Build batch inputs
-        batch_inputs: List[tuple] = []
-        for idx in tqdm(range(n_sessions), desc="  Building inputs", unit="sess",
-                        miniters=n_sessions // 100, file=sys.stdout):
-            if identities is not None:
-                cid  = identities[idx]["client_id"]
-                item = identities[idx]["sku"]
-            else:
-                cid  = int(rng_np.integers(1, 10_000_000))
-                item = int(rng_np.integers(0, VOCAB_K))
-
-            offset_s = rng_py.randint(0, window_s)
-            start_dt = start_base + pd.Timedelta(seconds=offset_s)
-            past     = self._user_registry.get(cid)
-            history  = past[-HISTORY_WINDOW:] if past else None
-            batch_inputs.append((cid, item, start_dt, history))
+        batch_inputs = self._build_batch_inputs(n_sessions, seed)
 
         # Generate in batches - all sessions in a batch run in parallel on GPU
         sessions: List[List[dict]] = []
