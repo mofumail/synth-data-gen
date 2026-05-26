@@ -78,6 +78,36 @@ def _actions_default(cfg: dict) -> str:
     return ",".join(actions)
 
 
+def _resolved_config(args, out_path: Path, basket_actions: tuple[str, ...]) -> dict:
+    return {
+        "config": str(args.config_path),
+        "model": EVAL_MODEL_NAME,
+        "model_path": str(EVAL_MODEL_SUBDIR / "model.pt"),
+        "output": str(out_path),
+        "n_users": args.n_users,
+        "k": args.k,
+        "seed": args.seed,
+        "mode": args.mode,
+        "input_source": args.input_source,
+        "rec_action": args.rec_action,
+        "top_c": args.top_c,
+        "actions": list(basket_actions),
+        "batch_size": args.batch_size,
+        "algorithm": args.algorithm,
+    }
+
+
+def _save_resolved_config(args, out_path: Path, basket_actions: tuple[str, ...]) -> Path:
+    cfg_path = out_path.with_suffix(".config.yaml")
+    cfg_path.write_text(
+        yaml.safe_dump(
+            _resolved_config(args, out_path, basket_actions),
+            sort_keys=False,
+        )
+    )
+    return cfg_path
+
+
 def parse_args():
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", type=str, default=str(BASKET_CONFIG_PATH),
@@ -169,6 +199,7 @@ def main():
     )
 
     save(df, out_path)
+    resolved_cfg_path = _save_resolved_config(args, out_path, basket_actions)
 
     n_with_basket = df.attrs.get("n_users_with_basket", 0)
     sizes = df[df["rank"] >= 0].groupby("user_id")["rank"].count()
@@ -183,7 +214,8 @@ def main():
         f"  empty baskets   : {df.attrs.get('empty_baskets', 0):,}\n"
         f"  short baskets   : {df.attrs.get('short_baskets', 0):,} (< k items)\n"
         f"  mean basket size: {mean_size:.2f}\n"
-        f"  output          : {out_path}"
+        f"  output          : {out_path}\n"
+        f"  resolved config : {resolved_cfg_path}"
     )
 
 
