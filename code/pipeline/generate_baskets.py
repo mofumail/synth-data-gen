@@ -11,7 +11,13 @@ Default output:
 Usage:
     PYTHONPATH=. uv run python generate_baskets.py --rec-action add_to_cart
     PYTHONPATH=. uv run python generate_baskets.py --n-users 1000 --k 20 --rec-action product_buy
-    PYTHONPATH=. uv run python generate_baskets.py --mode rollout --actions product_buy
+    PYTHONPATH=. uv run python generate_baskets.py --mode rollout --actions product_buy,add_to_cart
+
+Top-K mode requires --rec-action and accepts positive item actions only:
+    add_to_cart or product_buy
+
+Rollout mode ignores --rec-action. Use --actions there to choose which sampled
+event types become basket items.
 
 Round-trip to dict
     from evaluation.baskets import load_as_dict
@@ -60,6 +66,7 @@ def parse_args():
                         "(default, best for recommendation baskets). sampler: legacy "
                         "identity sampler/random fallback with unique user IDs.")
     p.add_argument("--rec-action", type=str, default=None,
+                   choices=["add_to_cart", "product_buy"],
                    help="Required in topk mode. Action the item head is conditioned on "
                         "(for example: add_to_cart or product_buy). Ignored in rollout mode.")
     p.add_argument("--top-c",      type=int, default=100,
