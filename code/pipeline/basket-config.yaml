@@ -1,0 +1,33 @@
+# Recommendation basket generation defaults.
+#
+# CLI flags in generate_baskets.py override these values.
+
+n_users: 100
+k: 20
+seed: 42
+
+# topk: score the item head and take ranked top-K recommendations.
+# rollout: sample sessions, filter events with `actions`, then truncate to K.
+mode: topk
+
+# train: unique real train users with prior-session history.
+# sampler: legacy identity sampler/random fallback with unique user IDs.
+input_source: train
+
+# Required for topk mode. Valid values: add_to_cart, product_buy.
+# Ignored in rollout mode.
+rec_action: add_to_cart
+
+# Candidate categories scored per user in topk hier/svdpq mode.
+top_c: 100
+
+# Rollout-only basket-defining event types.
+actions:
+  - product_buy
+  - add_to_cart
+
+batch_size: 512
+
+# Optional output metadata/path overrides. Leave null for defaults.
+algorithm: null
+out: null
