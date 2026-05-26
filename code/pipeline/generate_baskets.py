@@ -10,7 +10,7 @@ Default output:
 
 Usage:
     PYTHONPATH=. uv run python generate_baskets.py --rec-action add_to_cart
-    PYTHONPATH=. uv run python generate_baskets.py --n-users 1000 --k 20 --rec-action product_buy
+    PYTHONPATH=. uv run python generate_baskets.py --n-users 1000 --k 20 --rec-action add_to_cart
     PYTHONPATH=. uv run python generate_baskets.py --mode rollout --actions product_buy,add_to_cart
 
 Top-K mode requires --rec-action and accepts positive item actions only:
