@@ -273,13 +273,15 @@ class SessionGenerator:
         self,
         batch_inputs: Sequence[tuple],
         k: int = 20,
-        rec_action: str = "add_to_cart",
+        rec_action: Optional[str] = None,
         top_c: int = 100,
     ) -> List[List[dict]]:
         """Top-K recommendation baskets for explicit pre-built user inputs."""
         from simulation.generator.heads import ACTION2IDX
         if self._model is None:
             self._load_model()
+        if not rec_action:
+            raise ValueError("rec_action is required for top-K basket scoring")
         if rec_action not in ACTION2IDX:
             raise ValueError(
                 f"rec_action must be one of {sorted(ACTION2IDX)}, got {rec_action!r}"
@@ -304,7 +306,7 @@ class SessionGenerator:
         n_users: int,
         seed: int,
         k: int = 20,
-        rec_action: str = "add_to_cart",
+        rec_action: Optional[str] = None,
         top_c: int = 100,
     ) -> List[List[dict]]:
         """
@@ -316,6 +318,8 @@ class SessionGenerator:
         from simulation.generator.heads import ACTION2IDX
         if self._model is None:
             self._load_model()
+        if not rec_action:
+            raise ValueError("rec_action is required for top-K basket scoring")
         if rec_action not in ACTION2IDX:
             raise ValueError(
                 f"rec_action must be one of {sorted(ACTION2IDX)}, got {rec_action!r}"

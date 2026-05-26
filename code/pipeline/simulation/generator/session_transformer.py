@@ -667,8 +667,9 @@ class SessionTransformer(nn.Module):
 
         Unlike infer_batch (which samples a behavioral trajectory and yields
         ~1-2 item-bearing events), this reads the model's item marginal
-        log p(sku) at step 0  given the user's history and conditioned on a
-        "recommend" action  and takes the K highest-scoring items. E
+        log p(sku) at step 0, given the user's history and conditioned on the
+        caller-provided recommendation action, then takes the K highest-scoring
+        items.
 
         Dispatch on item_head_mode:
             flat  = global top-K over the fc logits (no category).
@@ -682,7 +683,7 @@ class SessionTransformer(nn.Module):
         B       = len(batch_inputs)
         idx2sku = getattr(self, "_idx2sku", {})
         if rec_action_idx is None:
-            rec_action_idx = ACTION2IDX["add_to_cart"]
+            raise ValueError("rec_action_idx is required for top-K basket scoring")
 
         autocast_ctx = (
             torch.autocast("cuda", dtype=torch.bfloat16)

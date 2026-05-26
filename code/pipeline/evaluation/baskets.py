@@ -223,7 +223,7 @@ def generate_baskets(
     *,
     mode: str = "topk",
     input_source: str = DEFAULT_INPUT_SOURCE,
-    rec_action: str = "add_to_cart",
+    rec_action: Optional[str] = None,
     top_c: int = 100,
     batch_size: int = 512,
     identity_sampler_path: Optional[Path] = None,
@@ -237,7 +237,8 @@ def generate_baskets(
     input_source="sampler": use the legacy identity sampler/random fallback;
         score_baskets still enforces unique user IDs.
     mode="topk" (default): read the item-head distribution at step 0 and take
-        the k most probable SKUs per user. Exactly k items, ranked by score.
+        the k most probable SKUs per user, conditioned on the required
+        rec_action. Exactly k items, ranked by score.
     mode="rollout": sample a behavioral session per user and filter events to
         basket_actions..
 
@@ -251,6 +252,8 @@ def generate_baskets(
         raise ValueError(f"mode must be 'topk' or 'rollout', got {mode!r}")
     if input_source not in {"train", "sampler"}:
         raise ValueError(f"input_source must be 'train' or 'sampler', got {input_source!r}")
+    if mode == "topk" and not rec_action:
+        raise ValueError("rec_action is required when mode='topk'")
     if algorithm is None:
         algorithm = EVAL_MODEL_NAME or "unknown"
 

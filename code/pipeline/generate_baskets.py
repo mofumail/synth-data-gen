@@ -9,9 +9,9 @@ Default output:
     output/models/<EVAL_MODEL_NAME>/baskets/baskets-<DDMMYY-HH-MM-SS>.parquet
 
 Usage:
-    PYTHONPATH=. uv run python generate_baskets.py
-    PYTHONPATH=. uv run python generate_baskets.py --n-users 1000 --k 20
-    PYTHONPATH=. uv run python generate_baskets.py --actions product_buy
+    PYTHONPATH=. uv run python generate_baskets.py --rec-action add_to_cart
+    PYTHONPATH=. uv run python generate_baskets.py --n-users 1000 --k 20 --rec-action product_buy
+    PYTHONPATH=. uv run python generate_baskets.py --mode rollout --actions product_buy
 
 Round-trip to dict
     from evaluation.baskets import load_as_dict
@@ -59,8 +59,9 @@ def parse_args():
                    help="train: unique real train users with prior-session history "
                         "(default, best for recommendation baskets). sampler: legacy "
                         "identity sampler/random fallback with unique user IDs.")
-    p.add_argument("--rec-action", type=str, default="add_to_cart",
-                   help="Action the heads are conditioned on in topk mode (default: add_to_cart)")
+    p.add_argument("--rec-action", type=str, default=None,
+                   help="Required in topk mode. Action the item head is conditioned on "
+                        "(for example: add_to_cart or product_buy). Ignored in rollout mode.")
     p.add_argument("--top-c",      type=int, default=100,
                    help="Candidate categories scored per user in topk hier/svdpq mode (default: 100)")
     p.add_argument("--actions",    type=str, default=",".join(DEFAULT_BASKET_ACTIONS),
@@ -71,7 +72,10 @@ def parse_args():
                    help="Algorithm tag written to the output (default: eval_model folder name)")
     p.add_argument("--out",        type=str, default=None,
                    help="Output parquet path (default: <eval_model>/baskets/baskets-<stamp>.parquet)")
-    return p.parse_args()
+    args = p.parse_args()
+    if args.mode == "topk" and not args.rec_action:
+        p.error("--rec-action is required when --mode topk; choose the action to condition item scoring on")
+    return args
 
 
 def main():
