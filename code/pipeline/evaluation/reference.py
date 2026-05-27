@@ -10,6 +10,7 @@ Also provides RealData (train/val/test session container) and RealDataLoader.
 
 from __future__ import annotations
 
+import gc
 import os
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -164,107 +165,113 @@ class RealDataLoader:
         )
         cache_dir = OUTPUT_DIR / f"real_sessions_agg_{cache_tag}"
 
-        def agg_to_sessions(agg_df: "pl.DataFrame") -> List[List[dict]]:
-            """Convert aggregated Polars DataFrame to List[List[dict]].
-            Single-threaded — multiprocessing was removed because pickling 5M dicts
-            through IPC pipes doubled peak RAM and caused OOM. Without pd.Timestamp()
-            the plain Python loop is fast enough (~15-20s for 5M sessions).
+        def parquet_to_sessions(pq_path: Path) -> List[List[dict]]:
+            """Stream a cached split parquet into List[List[dict]] in row slices.
+
+            Only ~CHUNK rows of Arrow are resident at a time, so the full split's
+            Arrow buffers (~13GB on train) never coexist with the growing dict
+            list. This is what keeps peak RSS near the ~33GB dict floor instead of
+            the ~51GB it hit when the whole split frame was read up front. Applies
+            to BOTH the cold build and the warm cache-hit path.
             """
-            cids     = agg_df["client_id"].to_list()
-            ev_types = agg_df["event_types"].to_list()
-            skus_col = agg_df["skus"].to_list()
-            tss_col  = agg_df["timestamps"].to_list()
-            return _build_sessions_chunk((
-                [int(c) for c in cids], ev_types, skus_col, tss_col
-            ))
+            CHUNK = 500_000
+            n = pl.scan_parquet(pq_path).select(pl.len()).collect().item()
+            out: List[List[dict]] = []
+            for off in range(0, n, CHUNK):
+                frame = pl.scan_parquet(pq_path).slice(off, CHUNK).collect()
+                cids     = [int(c) for c in frame["client_id"].to_list()]
+                ev_types = frame["event_types"].to_list()
+                skus_col = frame["skus"].to_list()
+                tss_col  = frame["timestamps"].to_list()
+                out.extend(_build_sessions_chunk((cids, ev_types, skus_col, tss_col)))
+                del frame, cids, ev_types, skus_col, tss_col
+            return out
 
-        if cache_dir.exists():
-            print(f"  Loading aggregated session cache ({cache_dir.name}) ...")
-            train_agg = pl.read_parquet(cache_dir / "train.parquet")
-            val_agg   = pl.read_parquet(cache_dir / "val.parquet")
-            print("  Building train sessions ...")
-            train = agg_to_sessions(train_agg)
-            print(f"    {len(train):,} train sessions")
-            print("  Building val sessions ...")
-            val = agg_to_sessions(val_agg)
-            print(f"    {len(val):,} val sessions")
-            test = []
-            if include_test and (cache_dir / "test.parquet").exists():
-                test_agg = pl.read_parquet(cache_dir / "test.parquet")
-                print("  Building test sessions ...")
-                test = agg_to_sessions(test_agg)
-                print(f"    {len(test):,} test sessions")
-            return RealData(train_split=train, val_split=val, test_split=test)
+        # --- Build the aggregate parquet cache if missing ---
+        # The cache holds compact per-split aggregates (~100MB). Heavy Arrow frames
+        # are written and freed here, BEFORE any List[List[dict]] is materialized,
+        # so aggregation memory and dict memory never stack.
+        if not cache_dir.exists():
+            # Single-pass lazy query: no global sort, no session_starts join.
+            # Sort within each group via sort_by() — O(k log k) per session (~7 events)
+            # vs global O(N log N) on 199M rows. Drop maintain_order (hash groupby is faster).
+            train_cut = pd.Timestamp(TRAIN_CUTOFF)
+            val_cut   = pd.Timestamp(VAL_CUTOFF)
 
-        # --- Full build from raw parquet ---
-        # Single-pass lazy query: no global sort, no session_starts join.
-        # Sort within each group via sort_by() — O(k log k) per session (~7 events)
-        # vs global O(N log N) on 199M rows. Drop maintain_order (hash groupby is faster).
-        train_cut = pd.Timestamp(TRAIN_CUTOFF)
-        val_cut   = pd.Timestamp(VAL_CUTOFF)
-
-        print("  Aggregating sessions from parquet (single pass) ...")
-        full_agg = (
-            pl.scan_parquet(path)
-            .select(["client_id", "timestamp", "event_type", "session_id", "sku"])
-            .group_by("session_id")
-            .agg(
-                pl.col("client_id").first(),
-                pl.col("event_type").sort_by("timestamp").alias("event_types"),
-                pl.col("sku").sort_by("timestamp").alias("skus"),
-                pl.col("timestamp").sort().alias("timestamps"),
-                pl.col("timestamp").min().alias("session_start"),
-                pl.len().alias("n"),
+            print("  Aggregating sessions from parquet (streaming sink) ...")
+            # Sink the group_by straight to disk via the streaming engine so the
+            # 199M-row input is processed in batches instead of materialized in RAM
+            # (a plain .collect() spikes to ~51GB here). Read back the compact
+            # aggregate (~480MB) to split/sample — that's only a few GB resident.
+            tmp_agg = OUTPUT_DIR / f"_full_agg_tmp_{mtime}.parquet"
+            (
+                pl.scan_parquet(path)
+                .select(["client_id", "timestamp", "event_type", "session_id", "sku"])
+                .group_by("session_id")
+                .agg(
+                    pl.col("client_id").first(),
+                    pl.col("event_type").sort_by("timestamp").alias("event_types"),
+                    pl.col("sku").sort_by("timestamp").alias("skus"),
+                    pl.col("timestamp").sort().alias("timestamps"),
+                    pl.col("timestamp").min().alias("session_start"),
+                    pl.len().alias("n"),
+                )
+                .filter(pl.col("n") >= min_length)
+                .sink_parquet(tmp_agg)
             )
-            .filter(pl.col("n") >= min_length)
-            .collect()
-        )
+            full_agg = pl.read_parquet(tmp_agg)
 
-        def make_agg(filter_expr, max_n: Optional[int]) -> "pl.DataFrame":
-            agg_df = full_agg.filter(filter_expr)
-            if max_n is not None:
-                agg_df = agg_df.sample(n=min(max_n, len(agg_df)), seed=42)
-            return agg_df.drop("session_start", "n")
+            def make_agg(source: "pl.DataFrame", filter_expr, max_n: Optional[int]) -> "pl.DataFrame":
+                agg_df = source.filter(filter_expr)
+                if max_n is not None:
+                    agg_df = agg_df.sample(n=min(max_n, len(agg_df)), seed=42)
+                return agg_df.drop("session_start", "n")
 
+            train_agg = make_agg(full_agg, pl.col("session_start") < train_cut, max_train_sessions)
+            val_agg   = make_agg(
+                full_agg,
+                (pl.col("session_start") >= train_cut) & (pl.col("session_start") < val_cut),
+                max_val_sessions,
+            )
+
+            print(f"  Saving aggregated session cache -> {cache_dir.name}/ ...")
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            train_agg.write_parquet(cache_dir / "train.parquet")
+            val_agg.write_parquet(cache_dir / "val.parquet")
+
+            if include_test:
+                print("  Aggregating test split (LOCKED - final evaluation only) ...")
+                test_path = str(test_parquet_path or TEST_PARQUET)
+                df_test = pl.read_parquet(
+                    test_path,
+                    columns=["client_id", "timestamp", "event_type", "session_id", "sku"],
+                ).sort(["session_id", "timestamp"])
+                df_test = df_test.join(
+                    df_test.group_by("session_id").agg(pl.col("timestamp").min().alias("session_start")),
+                    on="session_id",
+                )
+                test_agg = make_agg(df_test, pl.lit(True), max_test_sessions)
+                test_agg.write_parquet(cache_dir / "test.parquet")
+                del df_test, test_agg
+
+            # Free all Arrow before the dict build — dict memory must not stack on it.
+            del full_agg, train_agg, val_agg
+            gc.collect()
+            tmp_agg.unlink(missing_ok=True)
+
+        # --- Materialize dict lists by streaming the cached parquets (both paths) ---
+        print(f"  Loading aggregated session cache ({cache_dir.name}) ...")
         print("  Building train sessions ...")
-        train_agg = make_agg(pl.col("session_start") < train_cut, max_train_sessions)
-        train = agg_to_sessions(train_agg)
+        train = parquet_to_sessions(cache_dir / "train.parquet")
         print(f"    {len(train):,} train sessions")
-
         print("  Building val sessions ...")
-        val_agg = make_agg(
-            (pl.col("session_start") >= train_cut) & (pl.col("session_start") < val_cut),
-            max_val_sessions,
-        )
-        val = agg_to_sessions(val_agg)
+        val = parquet_to_sessions(cache_dir / "val.parquet")
         print(f"    {len(val):,} val sessions")
-
-        test, test_agg = [], None
-        if include_test:
-            print("  Building test sessions (LOCKED - final evaluation only) ...")
-            test_path = str(test_parquet_path or TEST_PARQUET)
-            df_test = pl.read_parquet(
-                test_path,
-                columns=["client_id", "timestamp", "event_type", "session_id", "sku"],
-            ).sort(["session_id", "timestamp"])
-            df_test = df_test.join(
-                df_test.group_by("session_id").agg(pl.col("timestamp").min().alias("session_start")),
-                on="session_id",
-            )
-            test_agg = make_agg(df_test, pl.lit(True), max_test_sessions)
-            test = agg_to_sessions(test_agg)
+        test = []
+        if include_test and (cache_dir / "test.parquet").exists():
+            print("  Building test sessions ...")
+            test = parquet_to_sessions(cache_dir / "test.parquet")
             print(f"    {len(test):,} test sessions")
-        else:
-            print("  Test split not loaded (pass include_test=True for final evaluation only).")
-
-        # Save aggregated parquets (compact, no OOM risk)
-        print(f"  Saving aggregated session cache -> {cache_dir.name}/ ...")
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        train_agg.write_parquet(cache_dir / "train.parquet")
-        val_agg.write_parquet(cache_dir / "val.parquet")
-        if test_agg is not None:
-            test_agg.write_parquet(cache_dir / "test.parquet")
-
         return RealData(train_split=train, val_split=val, test_split=test)
 
 
