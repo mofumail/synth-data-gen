@@ -332,24 +332,6 @@ class EvaluationOrchestrator:
         real_train_sample = [real_data.train_split[i] for i in idxs]
         self._save_sessions(real_train_sample, SYNTH_DIR / f"real_train-seed{seed}-{n_real}.parquet")
 
-        print(f"  Computing downstream utility (n_sessions={n_sessions}, TRTR sample={n_real}) ...")
-        # Shared-vocab OOV filter uses the *intersection* of all three conditions'
-        # train vocabs, not TRTR's. Using TRTR as reference systematically dings
-        # TSTR when a gt item sits in TRTR ∩ real_test but not in TSTR's vocab —
-        # that pair auto-misses for TSTR but counts as a valid hit for TRTR.
-        util_T, util_M, util_RR = down_ev.evaluate_all_shared_vocab(
-            conditions=[
-                ("TSTR-T", synth_T_downstream),
-                ("TSTR-M", synth_M_downstream),
-                ("TRTR",   real_train_sample),
-            ],
-            real_test      = downstream_split,
-            seed           = seed,
-            reference_cond = None,
-        )
-        del synth_T_downstream, synth_M_downstream
-        gc.collect()
-
         # --- Fidelity of TRTR sample vs reference distributions ---
         print("  Computing TRTR fidelity vs train ...")
         fidelity_trtr_train = fid_ev.evaluate(
@@ -361,6 +343,28 @@ class EvaluationOrchestrator:
             real_data, real_train_sample, val_ref_store,
             matched_source=real_data.val_split,
         )
+
+        real_train_downstream = self._item_only_sessions(real_train_sample)
+        del real_train_sample
+        gc.collect()
+
+        print(f"  Computing downstream utility (n_sessions={n_sessions}, TRTR sample={n_real}) ...")
+        # Shared-vocab OOV filter uses the *intersection* of all three conditions'
+        # train vocabs, not TRTR's. Using TRTR as reference systematically dings
+        # TSTR when a gt item sits in TRTR ∩ real_test but not in TSTR's vocab —
+        # that pair auto-misses for TSTR but counts as a valid hit for TRTR.
+        util_T, util_M, util_RR = down_ev.evaluate_all_shared_vocab(
+            conditions=[
+                ("TSTR-T", synth_T_downstream),
+                ("TSTR-M", synth_M_downstream),
+                ("TRTR",   real_train_downstream),
+            ],
+            real_test      = downstream_split,
+            seed           = seed,
+            reference_cond = None,
+        )
+        del synth_T_downstream, synth_M_downstream, real_train_downstream
+        gc.collect()
 
         result = SeedResult(
             seed                  = seed,

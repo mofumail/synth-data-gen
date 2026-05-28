@@ -33,6 +33,7 @@ prior runs are never overwritten.
 """
 
 import argparse
+import gc
 import time
 from datetime import datetime
 
@@ -125,6 +126,14 @@ def build_transformer_generator(ref_store: ReferenceStore) -> SessionGenerator:
     )
 
 
+def trim_to_item_only_sessions(sessions):
+    """Keep only item-bearing SKU order for downstream-only real splits in-place."""
+    for i, session in enumerate(sessions):
+        sessions[i] = [{"sku": ev["sku"]} for ev in session if ev.get("sku") is not None]
+    gc.collect()
+    return sessions
+
+
 def evaluate(args):
     t0 = time.time()
 
@@ -144,6 +153,8 @@ def evaluate(args):
         max_val_sessions   = args.max_val,
         max_test_sessions  = args.max_test,
         include_test       = args.final,
+        item_only_val      = VAL_REF_STORE_PATH.exists(),
+        item_only_test     = args.final,
     )
 
     # Filter to current vocab so coverage / popularity are bounded by what the
@@ -157,6 +168,15 @@ def evaluate(args):
 
     # Reference stores
     ref_store, val_ref_store = build_ref_store(real_data)
+
+    # The held-out split is only used for leave-one-out downstream utility and
+    # matched-N SKU bias denominators after this point; both read only sku.
+    # Dropping timestamps/event_type from val/test saves several GB without
+    # changing any computed metric.
+    if args.final:
+        trim_to_item_only_sessions(real_data.test_split)
+    else:
+        trim_to_item_only_sessions(real_data.val_split)
 
     # Generators
     print("\nBuilding generators ...")

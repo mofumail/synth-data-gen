@@ -47,6 +47,14 @@ def _build_sessions_chunk(args: tuple) -> List[List[dict]]:
     return out
 
 
+def _build_item_sessions_chunk(skus_col) -> List[List[dict]]:
+    """Build sessions that preserve only SKU order for downstream/bias users."""
+    return [
+        [{"sku": int(sk) if sk is not None else None} for sk in skus]
+        for skus in skus_col
+    ]
+
+
 # Data containers
 
 @dataclass
@@ -142,6 +150,8 @@ class RealDataLoader:
         max_test_sessions:  Optional[int] = None,
         min_length: int = 2,
         include_test: bool = False,
+        item_only_val: bool = False,
+        item_only_test: bool = False,
     ) -> RealData:
         """
         Load train and val splits from events_clean.parquet.
@@ -165,7 +175,7 @@ class RealDataLoader:
         )
         cache_dir = OUTPUT_DIR / f"real_sessions_agg_{cache_tag}"
 
-        def parquet_to_sessions(pq_path: Path) -> List[List[dict]]:
+        def parquet_to_sessions(pq_path: Path, item_only: bool = False) -> List[List[dict]]:
             """Stream a cached split parquet into List[List[dict]] in row slices.
 
             Only ~CHUNK rows of Arrow are resident at a time, so the full split's
@@ -178,13 +188,19 @@ class RealDataLoader:
             n = pl.scan_parquet(pq_path).select(pl.len()).collect().item()
             out: List[List[dict]] = []
             for off in range(0, n, CHUNK):
-                frame = pl.scan_parquet(pq_path).slice(off, CHUNK).collect()
-                cids     = [int(c) for c in frame["client_id"].to_list()]
-                ev_types = frame["event_types"].to_list()
-                skus_col = frame["skus"].to_list()
-                tss_col  = frame["timestamps"].to_list()
-                out.extend(_build_sessions_chunk((cids, ev_types, skus_col, tss_col)))
-                del frame, cids, ev_types, skus_col, tss_col
+                if item_only:
+                    frame = pl.scan_parquet(pq_path).select("skus").slice(off, CHUNK).collect()
+                    skus_col = frame["skus"].to_list()
+                    out.extend(_build_item_sessions_chunk(skus_col))
+                    del frame, skus_col
+                else:
+                    frame = pl.scan_parquet(pq_path).slice(off, CHUNK).collect()
+                    cids     = [int(c) for c in frame["client_id"].to_list()]
+                    ev_types = frame["event_types"].to_list()
+                    skus_col = frame["skus"].to_list()
+                    tss_col  = frame["timestamps"].to_list()
+                    out.extend(_build_sessions_chunk((cids, ev_types, skus_col, tss_col)))
+                    del frame, cids, ev_types, skus_col, tss_col
             return out
 
         # --- Build the aggregate parquet cache if missing ---
@@ -264,13 +280,13 @@ class RealDataLoader:
         print("  Building train sessions ...")
         train = parquet_to_sessions(cache_dir / "train.parquet")
         print(f"    {len(train):,} train sessions")
-        print("  Building val sessions ...")
-        val = parquet_to_sessions(cache_dir / "val.parquet")
+        print(f"  Building val sessions{' (item-only)' if item_only_val else ''} ...")
+        val = parquet_to_sessions(cache_dir / "val.parquet", item_only=item_only_val)
         print(f"    {len(val):,} val sessions")
         test = []
         if include_test and (cache_dir / "test.parquet").exists():
-            print("  Building test sessions ...")
-            test = parquet_to_sessions(cache_dir / "test.parquet")
+            print(f"  Building test sessions{' (item-only)' if item_only_test else ''} ...")
+            test = parquet_to_sessions(cache_dir / "test.parquet", item_only=item_only_test)
             print(f"    {len(test):,} test sessions")
         return RealData(train_split=train, val_split=val, test_split=test)
 
