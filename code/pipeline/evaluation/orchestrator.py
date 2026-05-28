@@ -8,11 +8,13 @@ fidelity metrics and downstream utility as a secondary analysis.
 
 from __future__ import annotations
 
+import gc
 from pathlib import Path
 from typing import List
 
 import numpy as np
-import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import torch
 from scipy.stats import pearsonr
 
@@ -96,7 +98,6 @@ class EvaluationOrchestrator:
             seed_results.append(result)
 
             # Routine per-seed GPU teardown.
-            import gc
             gc.collect()
             torch.cuda.empty_cache()
             print(f"  GPU after seed {seed}: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated", flush=True)
@@ -109,15 +110,82 @@ class EvaluationOrchestrator:
 
     @staticmethod
     def _save_sessions(sessions: list, path: Path) -> None:
-        """Flatten List[List[dict]] -> parquet with a session_id column."""
-        rows = []
+        """Flatten List[List[dict]] -> parquet with a session_id column.
+
+        The previous implementation materialized all event rows as copied dicts,
+        then built one huge pandas DataFrame. Markov saves can exceed 20M events,
+        so write bounded Arrow row groups instead.
+        """
+        columns: list[str] = []
+        seen_columns: set[str] = set()
+        non_empty = 0
+        n_events = 0
+
         for sid, session in enumerate(sessions):
+            if session:
+                non_empty += 1
             for ev in session:
-                rows.append({**ev, "session_id": sid})
-        if rows:
-            pd.DataFrame(rows).to_parquet(path, index=False)
-            non_empty = sum(1 for s in sessions if s)
-            print(f"  Saved {non_empty:,} sessions ({len(rows):,} events) -> {path}", flush=True)
+                n_events += 1
+                for key in ev:
+                    if key not in seen_columns:
+                        seen_columns.add(key)
+                        columns.append(key)
+                if "session_id" not in seen_columns:
+                    seen_columns.add("session_id")
+                    columns.append("session_id")
+
+        if n_events == 0:
+            return
+
+        def _field_type(name: str) -> pa.DataType:
+            if name in {"client_id", "session_id"}:
+                return pa.int64()
+            if name == "event_type":
+                return pa.string()
+            if name == "timestamp":
+                return pa.timestamp("us")
+            if name in {"sku", "category"}:
+                return pa.float64()
+            return pa.string()
+
+        schema = pa.schema([(col, _field_type(col)) for col in columns])
+        chunk_events = 250_000
+        batch = {col: [] for col in columns}
+        batch_n = 0
+        writer = None
+
+        def _append_value(col: str, value):
+            if value is not None and col in {"sku", "category"}:
+                value = float(value)
+            batch[col].append(value)
+
+        def _flush() -> None:
+            nonlocal batch, batch_n, writer
+            if batch_n == 0:
+                return
+            table = pa.Table.from_pydict(batch, schema=schema)
+            if writer is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                writer = pq.ParquetWriter(path, schema=schema, compression="snappy")
+            writer.write_table(table)
+            batch = {col: [] for col in columns}
+            batch_n = 0
+
+        try:
+            for sid, session in enumerate(sessions):
+                for ev in session:
+                    for col in columns:
+                        value = sid if col == "session_id" else ev.get(col)
+                        _append_value(col, value)
+                    batch_n += 1
+                    if batch_n >= chunk_events:
+                        _flush()
+            _flush()
+        finally:
+            if writer is not None:
+                writer.close()
+
+        print(f"  Saved {non_empty:,} sessions ({n_events:,} events) -> {path}", flush=True)
 
     # Per-seed evaluation
 
@@ -146,9 +214,15 @@ class EvaluationOrchestrator:
         # --- Generate sessions ---
         print(f"  Generating {n_sessions} transformer sessions ...")
         synth_T_raw_all  = primary_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=False)
+        print("  Computing validity ...")
+        validity_pre = val_chk.evaluate(synth_T_raw_all)
+        del synth_T_raw_all
+        gc.collect()
+
         if hasattr(primary_gen, "reset_registry"):
             primary_gen.reset_registry()   # clear invalid sessions before constrained pass
         synth_T_post_all = primary_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
+        validity_post = val_chk.evaluate(synth_T_post_all)
 
         print(f"  Generating {n_sessions} Markov sessions ...")
         synth_M_all = baseline_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
@@ -168,7 +242,11 @@ class EvaluationOrchestrator:
         # Validity metrics themselves still receive the raw (empties-included)
         # lists — ValidityChecker filters internally to report per-session rates.
         synth_T_post = [s for s in synth_T_post_all if s]
+        del synth_T_post_all
+        gc.collect()
         synth_M      = [s for s in synth_M_all      if s]
+        del synth_M_all
+        gc.collect()
         print(f"  synth_T_post: {len(synth_T_post):,}/{n_sessions:,} non-empty "
               f"({100*len(synth_T_post)/n_sessions:.1f}%)")
         print(f"  synth_M     : {len(synth_M):,}/{n_sessions:,} non-empty "
@@ -186,7 +264,6 @@ class EvaluationOrchestrator:
                 primary_gen._model.cpu()
             del primary_gen._model
             primary_gen._model = None
-            import gc
             gc.collect()
             torch.cuda.empty_cache()
         print(f"  GPU after transformer cleanup: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated", flush=True)
@@ -216,13 +293,6 @@ class EvaluationOrchestrator:
             real_data, synth_M, val_ref_store,
             matched_source=real_data.val_split,
         )
-
-        # --- Validity ---
-        # Raw (empties-included) lists: ValidityChecker.evaluate filters
-        # internally and reports per-session rates, which is what we want.
-        print("  Computing validity ...")
-        validity_pre  = val_chk.evaluate(synth_T_raw_all)
-        validity_post = val_chk.evaluate(synth_T_post_all)
 
         # --- Downstream utility ---
         # Sample exactly n_sessions real sessions for TRTR so training set size is
