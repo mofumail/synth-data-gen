@@ -322,19 +322,33 @@ class ReferenceProfiler:
     ) -> float:
         """Mean pairwise Jaccard distance on item sets (item-bearing only)."""
         max_s = max_samples or self.DIVERSITY_SAMPLES
-        item_sets = []
-        for session in sessions:
-            s = {e["sku"] for e in session if e.get("sku") is not None}
-            if s:
-                item_sets.append(s)
-
-        if len(item_sets) < 2:
+        n_item_sessions = sum(
+            1 for session in sessions
+            if any(e.get("sku") is not None for e in session)
+        )
+        if n_item_sessions < 2:
             return 0.0
 
-        if len(item_sets) > max_s:
+        selected_ranks = None
+        if n_item_sessions > max_s:
             rng = np.random.default_rng(42)
-            idx = rng.choice(len(item_sets), max_s, replace=False)
-            item_sets = [item_sets[i] for i in idx]
+            idx = rng.choice(n_item_sessions, max_s, replace=False)
+            selected_ranks = {int(src_idx): rank for rank, src_idx in enumerate(idx)}
+
+        item_sets = []
+        valid_idx = 0
+        for session in sessions:
+            s = {e["sku"] for e in session if e.get("sku") is not None}
+            if not s:
+                continue
+            if selected_ranks is None:
+                item_sets.append(s)
+            elif valid_idx in selected_ranks:
+                item_sets.append((selected_ranks[valid_idx], s))
+            valid_idx += 1
+
+        if selected_ranks is not None:
+            item_sets = [s for _, s in sorted(item_sets, key=lambda x: x[0])]
 
         total, count = 0.0, 0
         n = len(item_sets)

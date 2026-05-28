@@ -109,6 +109,20 @@ class EvaluationOrchestrator:
     # Helpers
 
     @staticmethod
+    def _item_only_sessions(sessions: list) -> list:
+        """Keep only item-bearing events for downstream GRU4Rec training.
+
+        GRU4RecAdapter.fit() reads only ev["sku"], and ignores events whose sku
+        is None. Preserving the outer session count and in-session SKU order
+        keeps the downstream sequences identical while dropping unused event
+        fields before later memory-heavy stages.
+        """
+        return [
+            [{"sku": ev["sku"]} for ev in session if ev.get("sku") is not None]
+            for session in sessions
+        ]
+
+    @staticmethod
     def _save_sessions(sessions: list, path: Path) -> None:
         """Flatten List[List[dict]] -> parquet with a session_id column.
 
@@ -224,17 +238,6 @@ class EvaluationOrchestrator:
         synth_T_post_all = primary_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
         validity_post = val_chk.evaluate(synth_T_post_all)
 
-        print(f"  Generating {n_sessions} Markov sessions ...")
-        synth_M_all = baseline_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
-
-        # Markov samples raw SKUs from CLEAN_PARQUET (full 1.5M catalog), so
-        # without this filter its coverage / popularity would be unfairly
-        # inflated vs the transformer (which is bounded to VOCAB_K by
-        # construction). Mirror what the transformer effectively emits.
-        vocab_skus = set(get_sku2idx().keys())
-        filter_sessions_to_vocab(synth_M_all, vocab_skus)
-        print(f"  Filtered Markov synth to {len(vocab_skus):,} in-vocab SKUs (VOCAB_K={VOCAB_K})")
-
         # Filter empty-session placeholders before fidelity / TSTR / save.
         # ValidityLayer leaves [] placeholders when a session fails constraints;
         # feeding those downstream shrinks the effective training set and
@@ -244,29 +247,13 @@ class EvaluationOrchestrator:
         synth_T_post = [s for s in synth_T_post_all if s]
         del synth_T_post_all
         gc.collect()
-        synth_M      = [s for s in synth_M_all      if s]
-        del synth_M_all
-        gc.collect()
+
         print(f"  synth_T_post: {len(synth_T_post):,}/{n_sessions:,} non-empty "
               f"({100*len(synth_T_post)/n_sessions:.1f}%)")
-        print(f"  synth_M     : {len(synth_M):,}/{n_sessions:,} non-empty "
-              f"({100*len(synth_M)/n_sessions:.1f}%)")
 
-        # --- Save synthetic datasets for offline exploration ---
+        # --- Save transformer dataset for offline exploration ---
         SYNTH_DIR.mkdir(parents=True, exist_ok=True)
         self._save_sessions(synth_T_post, SYNTH_DIR / f"{self.model_tag}-seed{seed}-{n_sessions}.parquet")
-        self._save_sessions(synth_M,      SYNTH_DIR / f"markov-seed{seed}-{n_sessions}.parquet")
-
-        # --- Delete generator model from GPU before TSTR training ---
-        # GRU4Rec needs GPU memory; free it after generation is done.
-        if hasattr(primary_gen, "_model") and primary_gen._model is not None:
-            if hasattr(primary_gen._model, "cpu"):
-                primary_gen._model.cpu()
-            del primary_gen._model
-            primary_gen._model = None
-            gc.collect()
-            torch.cuda.empty_cache()
-        print(f"  GPU after transformer cleanup: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated", flush=True)
 
         # --- Fidelity (primary generator, constrained) ---
         # matched_source must match the split ref_store was profiled from,
@@ -282,6 +269,41 @@ class EvaluationOrchestrator:
             matched_source=real_data.val_split,
         )
 
+        synth_T_downstream = self._item_only_sessions(synth_T_post)
+        del synth_T_post
+        gc.collect()
+
+        print(f"  Generating {n_sessions} Markov sessions ...")
+        synth_M_all = baseline_gen.generate(n_sessions=n_sessions, seed=seed, apply_constraints=True)
+
+        # Markov samples raw SKUs from CLEAN_PARQUET (full 1.5M catalog), so
+        # without this filter its coverage / popularity would be unfairly
+        # inflated vs the transformer (which is bounded to VOCAB_K by
+        # construction). Mirror what the transformer effectively emits.
+        vocab_skus = set(get_sku2idx().keys())
+        filter_sessions_to_vocab(synth_M_all, vocab_skus)
+        print(f"  Filtered Markov synth to {len(vocab_skus):,} in-vocab SKUs (VOCAB_K={VOCAB_K})")
+
+        synth_M      = [s for s in synth_M_all      if s]
+        del synth_M_all
+        gc.collect()
+        print(f"  synth_M     : {len(synth_M):,}/{n_sessions:,} non-empty "
+              f"({100*len(synth_M)/n_sessions:.1f}%)")
+
+        # --- Save Markov dataset for offline exploration ---
+        self._save_sessions(synth_M,      SYNTH_DIR / f"markov-seed{seed}-{n_sessions}.parquet")
+
+        # --- Delete generator model from GPU before TSTR training ---
+        # GRU4Rec needs GPU memory; free it after generation is done.
+        if hasattr(primary_gen, "_model") and primary_gen._model is not None:
+            if hasattr(primary_gen._model, "cpu"):
+                primary_gen._model.cpu()
+            del primary_gen._model
+            primary_gen._model = None
+            gc.collect()
+            torch.cuda.empty_cache()
+        print(f"  GPU after transformer cleanup: {torch.cuda.memory_allocated()/1e9:.2f} GB allocated", flush=True)
+
         # --- Fidelity (markov baseline) ---
         print("  Computing Markov fidelity vs train ...")
         fidelity_markov_train = fid_ev.evaluate(
@@ -293,6 +315,9 @@ class EvaluationOrchestrator:
             real_data, synth_M, val_ref_store,
             matched_source=real_data.val_split,
         )
+        synth_M_downstream = self._item_only_sessions(synth_M)
+        del synth_M
+        gc.collect()
 
         # --- Downstream utility ---
         # Sample exactly n_sessions real sessions for TRTR so training set size is
@@ -314,14 +339,16 @@ class EvaluationOrchestrator:
         # that pair auto-misses for TSTR but counts as a valid hit for TRTR.
         util_T, util_M, util_RR = down_ev.evaluate_all_shared_vocab(
             conditions=[
-                ("TSTR-T", synth_T_post),
-                ("TSTR-M", synth_M),
+                ("TSTR-T", synth_T_downstream),
+                ("TSTR-M", synth_M_downstream),
                 ("TRTR",   real_train_sample),
             ],
             real_test      = downstream_split,
             seed           = seed,
             reference_cond = None,
         )
+        del synth_T_downstream, synth_M_downstream
+        gc.collect()
 
         # --- Fidelity of TRTR sample vs reference distributions ---
         print("  Computing TRTR fidelity vs train ...")

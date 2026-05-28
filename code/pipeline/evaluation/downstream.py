@@ -144,13 +144,12 @@ class GRU4RecAdapter(RecSysAdapter):
 
     def fit(self, interactions: List[List[dict]], label: str = "GRU4Rec") -> None:
         # --- Build local vocab from training items (capped to top-K by frequency) ---
-        all_skus = [
-            ev["sku"]
-            for session in interactions
-            for ev in session
-            if ev.get("sku") is not None
-        ]
-        counts = Counter(all_skus)
+        counts = Counter()
+        for session in interactions:
+            for ev in session:
+                sku = ev.get("sku")
+                if sku is not None:
+                    counts[sku] += 1
         top_skus = [sku for sku, _ in counts.most_common(GRU4REC_VOCAB_K)]
         unique_skus = sorted(top_skus)
         self._item2idx = {sku: idx + 1 for idx, sku in enumerate(unique_skus)}
