@@ -58,8 +58,6 @@ reports [label="output/models/<eval_model>/reports/**\nHTML + JSON", shape=folde
 synth [label="output/synthetic/**\nseed outputs and simulation batches", shape=folder, fillcolor="#F2F4F7"];
 
 simulation [label="simulation/orchestrator.py\nlong-run synthetic batch simulator\narrival + identity + generation", fillcolor="#E0F2FE"];
-ingestion [label="ingestion/ingestor.py + uploader.py\nMongoDB real ingest and synthetic upload", fillcolor="#E0F2FE"];
-mongo [label="MongoDB\nreal_* / synthetic_* collections", shape=cylinder, fillcolor="#ECFDF3"];
 
 main -> preprocess [label="stage"];
 preprocess -> svdpq [label="stage"];
@@ -93,10 +91,7 @@ evaluate -> synth;
 evaluate -> models [label="identity sampler, GRU4Rec"];
 
 models -> simulation;
-caches -> simulation [label="legal bigrams / refs"];
+caches -> simulation [style=dashed, label="expects reference_store.joblib"];
 simulation -> synth [label="batch Parquets"];
-clean -> ingestion [label="real ingest"];
-synth -> ingestion [label="upload batches"];
-ingestion -> mongo [label="bulk insert"];
 
 }

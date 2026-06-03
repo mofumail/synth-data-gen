@@ -30,7 +30,7 @@ edge [
 ];
 
 rankdir=LR;
-label="C4 Component View - Arrival, Identity, Generation, Validity, and Upload";
+label="C4 Component View - Arrival, Identity, Generation, Validity, and Batches";
 
 
 sim_orch [label="SimulationOrchestrator\nlong-running synthetic simulator", fillcolor="#DBEAFE", penwidth=2.0];
@@ -42,22 +42,19 @@ history [label="user_history_buffer\nper-client deque, H=50", fillcolor="#FEF3C7
 pool [label="multiprocessing pool\nparallel _generate_session_worker", fillcolor="#E0F2FE"];
 session_gen [label="SessionGenerator\nlazy loads checkpoint\nruns batch autoregressive generation", fillcolor="#D1E9FF", penwidth=2.0];
 transformer [label="SessionTransformer.infer_batch()\nseed page_visit, decoder loop,\naction -> category/item -> temporal", fillcolor="#F0F9FF"];
-transition_mask [label="Pre-sampling constraints\nvalid_transitions/action mask\ninside model load/inference path", fillcolor="#ECFDF3"];
+transition_mask [label="Inference item constraints\nempty-category mask, cat SKU pools,\nflat/hier/SVD-PQ item scoring", fillcolor="#ECFDF3"];
 validity [label="ValidityLayer post-filter\nmonotonicity, purchase exposure,\nlegal bigrams", fillcolor="#ECFDF3"];
 events [label="event_buffer\nsynthetic event dicts", fillcolor="#FEF3C7"];
 batches [label="output/synthetic/synthetic_batch_*.parquet", shape=folder, fillcolor="#F2F4F7"];
-uploader [label="UploaderService\npoll output/synthetic every 10s\nupload and archive batch files", fillcolor="#E0F2FE"];
-archive [label="output/synthetic/archive/**", shape=folder, fillcolor="#F2F4F7"];
-mongo [label="MongoDB synthetic_* collections\npage_visit, search_query,\nadd_to_cart, remove_from_cart,\nproduct_buy", shape=cylinder, fillcolor="#ECFDF3"];
-ref [label="ReferenceStore\nlegal bigrams for validity", shape=folder, fillcolor="#F2F4F7"];
+ref [label="ReferenceStore path mismatch\nsimulation expects reference_store.joblib\nevaluation writes reference_store_vK.joblib", shape=folder, fillcolor="#FEE4E2"];
 model [label="output/models/<eval_model>/model.pt\nSessionTransformer checkpoint", shape=folder, fillcolor="#F2F4F7"];
 sampler [label="output/models/identity_sampler.pkl", shape=folder, fillcolor="#F2F4F7"];
 
 sim_orch -> arrival_iface [label="load arrival model"];
 arrival_iface -> arrival_missing [style=dashed, label="current code references"];
 sim_orch -> identity_simple [label="load + sample seed identities"];
-sim_orch -> ref [label="load legal bigrams"];
-ref -> validity;
+sim_orch -> ref [label="tries to load legal bigrams"];
+ref -> validity [style=dashed, label="if expected file exists"];
 sim_orch -> session_gen;
 model -> session_gen;
 sampler -> session_gen [style=dashed, label="evaluate.py generate() path"];
@@ -73,8 +70,5 @@ validity -> session_gen [label="invalid -> []"];
 session_gen -> events [label="valid events"];
 events -> history [label="extend per-client history"];
 events -> batches [label="save when buffer >= 10k\nor simulation ends"];
-batches -> uploader;
-uploader -> mongo;
-uploader -> archive [label="move processed files"];
 
 }

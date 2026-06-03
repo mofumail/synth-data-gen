@@ -65,7 +65,7 @@
 <path fill="#d1e9ff" stroke="#344054" stroke-width="1.2" d="M572.78,-1239.31C572.78,-1239.31 368.75,-1239.31 368.75,-1239.31 362.75,-1239.31 356.75,-1233.31 356.75,-1227.31 356.75,-1227.31 356.75,-1199.29 356.75,-1199.29 356.75,-1193.29 362.75,-1187.29 368.75,-1187.29 368.75,-1187.29 572.78,-1187.29 572.78,-1187.29 578.78,-1187.29 584.78,-1193.29 584.78,-1199.29 584.78,-1199.29 584.78,-1227.31 584.78,-1227.31 584.78,-1233.31 578.78,-1239.31 572.78,-1239.31"/>
 <text xml:space="preserve" text-anchor="middle" x="470.76" y="-1223.1" font-family="Inter,Arial,sans-serif" font-size="11.00">SessionGenerator lazy load</text>
 <text xml:space="preserve" text-anchor="middle" x="470.76" y="-1209.6" font-family="Inter,Arial,sans-serif" font-size="11.00">SessionTransformer.load(), sku2idx/idx2sku,</text>
-<text xml:space="preserve" text-anchor="middle" x="470.76" y="-1196.1" font-family="Inter,Arial,sans-serif" font-size="11.00">cat SKU pools, valid transitions</text>
+<text xml:space="preserve" text-anchor="middle" x="470.76" y="-1196.1" font-family="Inter,Arial,sans-serif" font-size="11.00">cat SKU pools, item&#45;head mode</text>
 </g>
 <!-- batch_inputs&#45;&gt;load_model -->
 <g id="edge4" class="edge">
@@ -195,7 +195,7 @@
 <title>no_item</title>
 <path fill="#e0f2fe" stroke="#344054" stroke-width="1.2" d="M370.28,-438.6C370.28,-438.6 223.25,-438.6 223.25,-438.6 217.25,-438.6 211.25,-432.6 211.25,-426.6 211.25,-426.6 211.25,-412.08 211.25,-412.08 211.25,-406.08 217.25,-400.08 223.25,-400.08 223.25,-400.08 370.28,-400.08 370.28,-400.08 376.28,-400.08 382.28,-406.08 382.28,-412.08 382.28,-412.08 382.28,-426.6 382.28,-426.6 382.28,-432.6 376.28,-438.6 370.28,-438.6"/>
 <text xml:space="preserve" text-anchor="middle" x="296.76" y="-422.39" font-family="Inter,Arial,sans-serif" font-size="11.00">Set SKU/category to None/PAD</text>
-<text xml:space="preserve" text-anchor="middle" x="296.76" y="-408.89" font-family="Inter,Arial,sans-serif" font-size="11.00">for page_visit/search/EOS</text>
+<text xml:space="preserve" text-anchor="middle" x="296.76" y="-408.89" font-family="Inter,Arial,sans-serif" font-size="11.00">for page_visit/search</text>
 </g>
 <!-- is_item&#45;&gt;no_item -->
 <g id="edge14" class="edge">
@@ -308,7 +308,7 @@
 <ellipse fill="#dbeafe" stroke="#344054" stroke-width="1.2" cx="457.76" cy="-620.4" rx="134.73" ry="36.78"/>
 <text xml:space="preserve" text-anchor="middle" x="457.76" y="-630.2" font-family="Inter,Arial,sans-serif" font-size="11.00">Synthetic sessions</text>
 <text xml:space="preserve" text-anchor="middle" x="457.76" y="-616.7" font-family="Inter,Arial,sans-serif" font-size="11.00">used by evaluation, saved Parquets,</text>
-<text xml:space="preserve" text-anchor="middle" x="457.76" y="-603.2" font-family="Inter,Arial,sans-serif" font-size="11.00">or simulation batch upload</text>
+<text xml:space="preserve" text-anchor="middle" x="457.76" y="-603.2" font-family="Inter,Arial,sans-serif" font-size="11.00">or simulation batch files</text>
 </g>
 <!-- empty&#45;&gt;out -->
 <g id="edge24" class="edge">

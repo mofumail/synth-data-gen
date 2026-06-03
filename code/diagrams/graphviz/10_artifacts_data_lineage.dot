@@ -30,7 +30,7 @@ edge [
 ];
 
 rankdir=TB;
-label="Artifact and Data Lineage - From Raw Data to Reports and MongoDB";
+label="Artifact and Data Lineage - From Raw Data to Reports";
 
 
 raw_events [label="../DATA event Parquets\n5 event streams", shape=cylinder, fillcolor="#FFF7ED"];
@@ -53,10 +53,7 @@ real_cache [label="output/real_sessions_agg_*/\ntrain.parquet, val.parquet,\nopt
 refs [label="ReferenceStores\nreference_store_vK.joblib\nval_reference_store_vK.joblib", shape=folder, fillcolor="#F2F4F7"];
 synthetic [label="output/synthetic/*.parquet\ntransformer + Markov outputs\nand simulation batches", shape=folder, fillcolor="#F2F4F7"];
 gru [label="output/models/gru4rec/*.pt\nTSTR-T, TSTR-M, TRTR", shape=folder, fillcolor="#F2F4F7"];
-reports [label="report-*/evaluation_report.html\nreport-*/evaluation_results.json", shape=folder, fillcolor="#FEF3C7"];
-mongo_real [label="MongoDB real_* collections", shape=cylinder, fillcolor="#ECFDF3"];
-mongo_synth [label="MongoDB synthetic_* collections", shape=cylinder, fillcolor="#ECFDF3"];
-archive [label="output/synthetic/archive/**", shape=folder, fillcolor="#F2F4F7"];
+reports [label="output/models/<eval_model>/reports/report-*/\nevaluation_report.html\nevaluation_results.json", shape=folder, fillcolor="#FEF3C7"];
 
 raw_events -> preprocess;
 product_props -> preprocess [label="category/price/name"];
@@ -81,16 +78,12 @@ test -> real_cache [label="--final only"];
 real_cache -> refs [label="ReferenceProfiler"];
 model_run -> synthetic [label="SessionGenerator"];
 identity -> synthetic [label="seed identities"];
-refs -> synthetic [label="validity legal bigrams"];
+refs -> synthetic [label="evaluation outputs only\nvalidity legal bigrams"];
 
 synthetic -> gru [label="TSTR-T/TSTR-M"];
 real_cache -> gru [label="TRTR + real holdout"];
 refs -> reports [label="fidelity references"];
 synthetic -> reports [label="saved sessions"];
 gru -> reports [label="utility metrics"];
-
-clean -> mongo_real [label="DataIngester"];
-synthetic -> mongo_synth [label="UploaderService"];
-synthetic -> archive [label="after upload"];
 
 }
