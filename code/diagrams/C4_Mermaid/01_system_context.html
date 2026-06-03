@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C4 Level 1 - System Context</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 0; background: #fff; color: #1f2937; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e7eb; }
+    main { padding: 1rem; overflow: auto; }
+    a { color: #2563eb; text-decoration: none; }
+    pre.mermaid { margin: 0; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+  </script>
+</head>
+<body>
+  <header><a href="index.html">C4 Mermaid</a> / 01 System Context</header>
+  <main>
+<pre class="mermaid">
+C4Context
+title C4 Level 1 - System Context
+
+System(pipeline, "Synthetic E-commerce Session Simulation Pipeline", "Generates and evaluates synthetic interaction sessions")
+
+System_Ext(raw_data, "Raw Synerise Event Data", "page_visit, search_query, add_to_cart, remove_from_cart, product_buy")
+System_Ext(product_props, "Product Properties", "sku, category, price, name")
+System_Ext(wandb, "Weights & Biases", "Training metrics and diagnostics")
+SystemDb_Ext(artifact_store, "Local Artifact Filesystem", "pipeline/output/**")
+SystemDb_Ext(report_store, "Evaluation Report Store", "HTML and JSON reports")
+
+Rel(raw_data, pipeline, "Provides raw events")
+Rel(product_props, pipeline, "Provides product metadata")
+Rel(pipeline, artifact_store, "Writes datasets, caches, checkpoints, samplers, synthetic sessions")
+Rel(pipeline, report_store, "Writes evaluation reports")
+Rel(pipeline, wandb, "Logs training metrics")
+UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+</pre>
+  </main>
+</body>
+</html>

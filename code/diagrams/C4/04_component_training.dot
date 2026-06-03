@@ -1,0 +1,68 @@
+digraph c4_component_training {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.8,
+  nodesep=0.55,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=LR;
+label="C4 Level 3 - Component View: Training";
+
+wandb [label="External System\nWeights & Biases\nTraining metrics and diagnostics", fillcolor="#F5F3FF"];
+
+clean_store [label="ContainerDb\nClean Event Store\nParquet\ntrain and validation sessions", shape=cylinder, fillcolor="#ECFDF3"];
+cache_store [label="ContainerDb\nFeature and Vocabulary Cache\njoblib / numpy\nvocab, category pools, SKU properties,\noptional SVD-PQ tokens, session caches", shape=folder, fillcolor="#F2F4F7"];
+model_store [label="ContainerDb\nModel Store\npt / yaml\nmodel.pt, model.yaml, .last_run,\ncheckpoint metadata", shape=folder, fillcolor="#ECFDF3"];
+subgraph cluster_container {
+  label="Container Boundary\nTraining";
+  fontname="Inter,Arial,sans-serif";
+  fontsize=13;
+  color="#98A2B3";
+  penwidth=1.2;
+  style="rounded,dashed";
+  margin=18;
+
+  train_controller [label="Component\nTraining Controller\ntrain.py\nCreates run folder, configures device,\ncoordinates training, validation,\nlogging, and checkpoint selection", fillcolor="#DBEAFE", penwidth=2.0];
+  interaction_loader [label="Component\nInteraction Loader\nInteractionGenerator / SessionDataset\nStreams train and validation batches\nwith session tensors and histories", fillcolor="#E0F2FE"];
+  model [label="Component\nSessionTransformer\nsimulation/generator/session_transformer.py\nCausal decoder with cross-session memory\nand action/category/item/temporal heads", fillcolor="#D1E9FF", penwidth=2.0];
+  objective [label="Component\nTraining Objective and Optimizer\nFactored cross-entropy losses,\noptional popularity mitigation,\nAdamW, scheduler, autocast, grad clipping", fillcolor="#FEF3C7"];
+  selector [label="Component\nCheckpoint Selector\nChooses best model by validation loss\nand applies early stopping", fillcolor="#FEE4E2"];
+}
+
+clean_store -> interaction_loader [label="train and validation sessions"];
+cache_store -> interaction_loader [label="session caches and vocab"];
+cache_store -> model [label="category pools, SKU properties,\noptional SVD-PQ tokens"];
+
+train_controller -> interaction_loader [label="loads batches"];
+train_controller -> model [label="trains model"];
+model -> objective [label="logits and item context"];
+objective -> train_controller [label="loss and optimizer updates"];
+train_controller -> selector [label="validation metrics"];
+selector -> model_store [label="promotes best checkpoint"];
+train_controller -> wandb [label="logs train and validation metrics"];
+
+}

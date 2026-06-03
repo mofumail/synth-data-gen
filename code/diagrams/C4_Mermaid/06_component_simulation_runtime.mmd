@@ -1,0 +1,32 @@
+C4Component
+title C4 Level 3 - Component View: Long-run Simulation Runtime
+
+ContainerDb(model_store, "Model Store", "pt / pkl", "configured eval model and identity sampler")
+ContainerDb(expected_ref, "Expected Reference Store", "joblib", "simulation expects output/reference_store.joblib; evaluation writes suffixed vK stores")
+ContainerDb(synth_store, "Synthetic Batch Store", "Parquet", "output/synthetic/synthetic_batch_*.parquet")
+
+Container_Boundary(simulation_container, "Long-run Simulation Runtime") {
+  Component(orchestrator, "Simulation Orchestrator", "simulation/orchestrator.py", "Coordinates arrivals, identity seeds, per-user history, multiprocessing, and batch persistence")
+  Component(arrival_interface, "Arrival Model Interface", "simulation/arrival/base.py", "Defines delay-generation contract")
+  Component(missing_arrivals, "Referenced Arrival Implementations", "Repo state note", "MMPPArrivalModel and TODArrivalModel are imported by orchestrator but not present in the current repo")
+  Component(identity_sampler, "Simple Identity Sampler", "simulation/identity/sampler.py", "Loads observed client_id/SKU seed pairs")
+  Component(session_generator, "Session Generator", "simulation/generator/session_generator.py", "Lazy-loads model and runs batched autoregressive generation")
+  Component(transformer_inference, "SessionTransformer Inference", "simulation/generator/session_transformer.py", "Samples action, category/item, and temporal bins with history memory")
+  Component(validity_layer, "Validity Layer", "simulation/validity.py", "Checks non-empty sessions, monotonicity, purchase exposure, and legal bigrams")
+  Component(batch_writer, "Batch Writer", "simulation/orchestrator.py", "In-memory event buffer and Parquet writer flushes synthetic_batch_*.parquet")
+}
+
+Rel(orchestrator, arrival_interface, "Requests inter-arrival delays")
+Rel(arrival_interface, missing_arrivals, "Current code imports")
+Rel(orchestrator, identity_sampler, "Requests seed identities")
+Rel(model_store, identity_sampler, "identity_sampler.pkl")
+Rel(orchestrator, session_generator, "client_id, seed SKU, start time, and user history")
+Rel(model_store, session_generator, "model.pt")
+Rel(session_generator, transformer_inference, "Batched generation")
+Rel(transformer_inference, validity_layer, "Generated session")
+Rel(expected_ref, validity_layer, "Legal bigrams if expected file exists")
+Rel(validity_layer, session_generator, "Valid session or []")
+Rel(session_generator, batch_writer, "Synthetic events")
+Rel(batch_writer, orchestrator, "Updates per-user history")
+Rel(batch_writer, synth_store, "Writes batch Parquets")
+UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="2")

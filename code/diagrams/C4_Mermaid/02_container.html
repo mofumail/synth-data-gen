@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C4 Level 2 - Container View</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 0; background: #fff; color: #1f2937; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e7eb; }
+    main { padding: 1rem; overflow: auto; }
+    a { color: #2563eb; text-decoration: none; }
+    pre.mermaid { margin: 0; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+  </script>
+</head>
+<body>
+  <header><a href="index.html">C4 Mermaid</a> / 02 Container</header>
+  <main>
+<pre class="mermaid">
+C4Container
+title C4 Level 2 - Container View
+
+System_Ext(raw_data, "Raw Synerise Event Data")
+System_Ext(product_props, "Product Properties")
+System_Ext(wandb, "Weights & Biases")
+
+System_Boundary(pipeline, "Synthetic E-commerce Session Simulation Pipeline") {
+  Container(cli, "Pipeline CLI Runner", "Python", "Runs configured stages and evaluation flags")
+  Container(ingestion, "Ingestion and Data Preparation", "Python / Polars", "Cleans events, builds vocab/cache artifacts, and computes SVD-PQ tokens")
+  Container(training, "Training", "PyTorch", "Trains SessionTransformer and selects best checkpoint")
+  Container(evaluation, "Evaluation and Reporting", "Python / PyTorch", "Generates synthetic sessions and computes fidelity, validity, and utility metrics")
+  Container(simulation, "Long-run Simulation Runtime", "Python / multiprocessing / PyTorch", "Generates batch Parquets from arrivals, identities, model inference, and validity")
+
+  ContainerDb(clean_store, "Clean Event Store", "Parquet", "events_clean.parquet and events_test.parquet")
+  ContainerDb(cache_store, "Feature and Vocabulary Cache", "joblib / numpy", "sku2idx, cat2idx, cat pools, SKU properties, SVD-PQ tokens, sessions")
+  ContainerDb(model_store, "Model Store", "pt / yaml / pkl", "SessionTransformer checkpoints, identity sampler, GRU4Rec checkpoints")
+  ContainerDb(ref_store, "Reference Store", "joblib", "reference_store_vK and val_reference_store_vK profiles")
+  ContainerDb(synth_store, "Synthetic Session Store", "Parquet", "Transformer, Markov, TRTR samples, and simulation batches")
+  ContainerDb(reports, "Report Store", "HTML / JSON", "output/models/<eval_model>/reports/**")
+}
+
+Rel(raw_data, ingestion, "Raw event streams")
+Rel(product_props, ingestion, "Product metadata")
+Rel(cli, ingestion, "preprocess and svdpq stages")
+Rel(cli, training, "train stage")
+Rel(cli, evaluation, "evaluate stage")
+
+Rel(ingestion, clean_store, "Writes cleaned train/val/test sessions")
+Rel(ingestion, cache_store, "Writes vocab, properties, tokens, caches")
+Rel(clean_store, training, "Train and validation sessions")
+Rel(cache_store, training, "Vocab, properties, optional SVD-PQ tokens")
+Rel(training, model_store, "Writes best checkpoint and config")
+Rel(training, wandb, "Logs training and validation metrics")
+
+Rel(model_store, evaluation, "Model under test and samplers")
+Rel(clean_store, evaluation, "Real train/val/test splits")
+Rel(cache_store, evaluation, "Current vocabulary")
+Rel(evaluation, ref_store, "Builds or loads reference profiles")
+Rel(evaluation, synth_store, "Writes generated sessions and samples")
+Rel(evaluation, model_store, "Writes identity sampler and GRU4Rec checkpoints")
+Rel(evaluation, reports, "Writes HTML and JSON reports")
+
+Rel(model_store, simulation, "Loads eval model and identity sampler")
+Rel(ref_store, simulation, "Legal bigrams only if expected reference_store.joblib exists")
+Rel(simulation, synth_store, "Writes synthetic_batch_*.parquet")
+UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="2")
+</pre>
+  </main>
+</body>
+</html>

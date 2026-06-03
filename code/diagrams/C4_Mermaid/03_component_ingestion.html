@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C4 Level 3 - Ingestion Components</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 0; background: #fff; color: #1f2937; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e7eb; }
+    main { padding: 1rem; overflow: auto; }
+    a { color: #2563eb; text-decoration: none; }
+    pre.mermaid { margin: 0; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+  </script>
+</head>
+<body>
+  <header><a href="index.html">C4 Mermaid</a> / 03 Component: Ingestion</header>
+  <main>
+<pre class="mermaid">
+C4Component
+title C4 Level 3 - Component View: Ingestion and Data Preparation
+
+System_Ext(raw_data, "Raw Synerise Event Data")
+System_Ext(product_props, "Product Properties")
+
+Container_Boundary(ingestion_container, "Ingestion and Data Preparation") {
+  Component(preprocess, "Preprocess CLI", "preprocess.py", "Normalizes, deduplicates, sessionizes, splits train/val/test, joins metadata, and builds category vocabulary")
+  Component(dataset, "Dataset and Cache Builder", "ingestion/dataset.py", "Builds SessionDataset, InteractionGenerator, SKU vocab, SKU properties, category pools, and session caches")
+  Component(svdpq, "SVD-PQ Tokenizer", "ingestion/svdpq.py", "Builds weighted user-SKU matrix, SVD factors, quantized SKU tokens, and cold-start fallback tokens")
+}
+
+ContainerDb(clean_store, "Clean Event Store", "Parquet", "events_clean.parquet and events_test.parquet")
+ContainerDb(cache_store, "Feature and Vocabulary Cache", "joblib / numpy", "cat2idx, sku2idx, cat_sku_pools, sku_properties, session_cache_*")
+ContainerDb(svdpq_store, "SVD-PQ Token Store", "joblib", "sku_tokens_vK.joblib")
+
+Rel(raw_data, preprocess, "Event Parquets")
+Rel(product_props, preprocess, "Category, price, name")
+Rel(preprocess, clean_store, "Clean train/val/test sessions")
+Rel(preprocess, cache_store, "Category vocabulary")
+
+Rel(clean_store, dataset, "Sessionized events")
+Rel(product_props, dataset, "SKU properties")
+Rel(dataset, cache_store, "Vocab, properties, category pools, session caches")
+
+Rel(clean_store, svdpq, "Training item interactions")
+Rel(cache_store, svdpq, "SKU vocab and category pools")
+Rel(svdpq, svdpq_store, "SVD-PQ item tokens")
+UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+</pre>
+  </main>
+</body>
+</html>

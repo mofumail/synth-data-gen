@@ -1,0 +1,52 @@
+C4Component
+title C4 Level 3 - Component View: Evaluation and Reporting
+
+ContainerDb(clean_store, "Clean Event Store", "Parquet", "train/val and optional locked test sessions")
+ContainerDb(cache_store, "Feature and Vocabulary Cache", "joblib / numpy", "current SKU vocabulary")
+ContainerDb(model_store, "Model Store", "pt / pkl", "model under test, identity sampler, GRU4Rec checkpoints")
+ContainerDb(ref_store, "Reference Store", "joblib", "train and validation reference profiles")
+ContainerDb(synth_store, "Synthetic Session Store", "Parquet", "transformer, Markov, and TRTR samples")
+ContainerDb(report_store, "Report Store", "HTML / JSON", "output/models/<eval_model>/reports/**")
+
+Container_Boundary(evaluation_container, "Evaluation and Reporting") {
+  Component(eval_controller, "Evaluation Controller", "evaluate.py", "Coordinates full evaluation, final-test mode, and fidelity-only mode")
+  Component(model_resolver, "Model Resolver", "evaluate.py", "Validates configured eval_model and required model.pt")
+  Component(identity_setup, "Identity Sampler Setup", "simulation/identity/CTGAN.py", "Loads or trains CTGAN IdentityFactory for generator seeds")
+  Component(real_loader, "Real Data Loader", "evaluation/reference.py", "Loads aggregate real sessions and filters splits to current vocabulary")
+  Component(reference_profiler, "Reference Profiler", "evaluation/reference.py", "Builds action/item distributions, legal bigrams, diversity, and bias profiles")
+  Component(transformer_generator, "Transformer Generator Adapter", "simulation/generator/session_generator.py", "Wraps SessionTransformer checkpoint, identity seeds, and ValidityLayer")
+  Component(markov_baseline, "Markov Baseline", "evaluation/markov.py", "Generates baseline sessions from real Parquet bigrams")
+  Component(orchestrator, "Evaluation Orchestrator", "evaluation/orchestrator.py", "Runs multi-seed generation, validity, fidelity, utility, and aggregation")
+  Component(metric_evaluators, "Metric Evaluators", "evaluation/*", "FidelityEvaluator, ValidityChecker, DownstreamEvaluator, GRU4RecAdapter")
+  Component(report_generator, "Report Generator", "evaluation/report.py", "Serializes aggregated results to HTML and JSON")
+}
+
+Rel(eval_controller, model_resolver, "Requires eval model")
+Rel(eval_controller, identity_setup, "Ensures identity sampler")
+Rel(eval_controller, real_loader, "Loads real splits")
+Rel(eval_controller, reference_profiler, "Builds or loads references")
+Rel(eval_controller, transformer_generator, "Builds primary generator")
+Rel(eval_controller, markov_baseline, "Builds baseline")
+Rel(eval_controller, orchestrator, "Starts evaluation")
+
+Rel(model_store, model_resolver, "model.pt")
+Rel(model_store, identity_setup, "identity_sampler.pkl")
+Rel(identity_setup, model_store, "Creates sampler if missing")
+Rel(clean_store, real_loader, "Real session data")
+Rel(cache_store, real_loader, "Current vocab")
+Rel(real_loader, reference_profiler, "Train and val splits")
+Rel(reference_profiler, ref_store, "Reference profiles")
+Rel(ref_store, transformer_generator, "Legal bigrams")
+Rel(model_store, transformer_generator, "Checkpoint and sampler")
+Rel(clean_store, markov_baseline, "Real Parquet source")
+
+Rel(transformer_generator, orchestrator, "Primary synthetic generator")
+Rel(markov_baseline, orchestrator, "Baseline generator")
+Rel(real_loader, orchestrator, "Real train, val, optional test")
+Rel(ref_store, orchestrator, "Train and val references")
+Rel(orchestrator, metric_evaluators, "Sessions and references")
+Rel(metric_evaluators, model_store, "GRU4Rec checkpoints")
+Rel(orchestrator, synth_store, "Saved sessions and samples")
+Rel(orchestrator, report_generator, "Aggregated result")
+Rel(report_generator, report_store, "HTML and JSON")
+UpdateLayoutConfig($c4ShapeInRow="4", $c4BoundaryInRow="2")

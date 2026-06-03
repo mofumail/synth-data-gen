@@ -1,0 +1,94 @@
+digraph c4_component_evaluation {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.8,
+  nodesep=0.55,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="C4 Level 3 - Component View: Evaluation and Reporting";
+
+researcher [label="Person\nResearcher", shape=ellipse, fillcolor="#E0F2FE"];
+clean_store [label="ContainerDb\nClean Event Store\nParquet\ntrain/val and optional locked test sessions", shape=cylinder, fillcolor="#ECFDF3"];
+cache_store [label="ContainerDb\nFeature and Vocabulary Cache\njoblib / numpy\ncurrent SKU vocabulary", shape=folder, fillcolor="#F2F4F7"];
+model_store [label="ContainerDb\nModel Store\npt / pkl\nmodel under test, identity sampler,\nGRU4Rec checkpoints", shape=folder, fillcolor="#F2F4F7"];
+ref_store [label="ContainerDb\nReference Store\njoblib\ntrain and validation reference profiles", shape=folder, fillcolor="#F2F4F7"];
+synth_store [label="ContainerDb\nSynthetic Session Store\nParquet\ntransformer, Markov, and TRTR samples", shape=folder, fillcolor="#F2F4F7"];
+report_store [label="ContainerDb\nReport Store\nHTML / JSON\noutput/models/<eval_model>/reports/**", shape=folder, fillcolor="#FEF3C7"];
+
+subgraph cluster_container {
+  label="Container Boundary\nEvaluation and Reporting";
+  fontname="Inter,Arial,sans-serif";
+  fontsize=13;
+  color="#98A2B3";
+  penwidth=1.2;
+  style="rounded,dashed";
+  margin=18;
+
+  eval_controller [label="Component\nEvaluation Controller\nevaluate.py\nCoordinates full evaluation, final-test mode,\nand fidelity-only mode", fillcolor="#DBEAFE", penwidth=2.0];
+  model_resolver [label="Component\nModel Resolver\nValidates configured eval_model\nand required model.pt", fillcolor="#FEE4E2"];
+  identity_setup [label="Component\nIdentity Sampler Setup\nLoads or trains CTGAN IdentityFactory\nfor generator seeds", fillcolor="#F5F3FF"];
+  real_loader [label="Component\nReal Data Loader\nevaluation/reference.py\nLoads aggregate real sessions and\nfilters splits to current vocabulary", fillcolor="#E0F2FE"];
+  reference_profiler [label="Component\nReference Profiler\nevaluation/reference.py\nBuilds action/item distributions,\nlegal bigrams, diversity, and bias profiles", fillcolor="#E0F2FE"];
+  transformer_generator [label="Component\nTransformer Generator Adapter\nsimulation/generator/session_generator.py\nWraps SessionTransformer checkpoint,\nidentity seeds, and ValidityLayer", fillcolor="#D1E9FF", penwidth=2.0];
+  markov_baseline [label="Component\nMarkov Baseline\nevaluation/markov.py\nGenerates baseline sessions from\nreal Parquet bigrams", fillcolor="#F0F9FF"];
+  orchestrator [label="Component\nEvaluation Orchestrator\nevaluation/orchestrator.py\nRuns multi-seed generation,\nvalidity, fidelity, utility,\nand aggregation", fillcolor="#DBEAFE", penwidth=2.0];
+  metric_evaluators [label="Component\nMetric Evaluators\nFidelityEvaluator, ValidityChecker,\nDownstreamEvaluator, GRU4RecAdapter", fillcolor="#ECFDF3"];
+  report_generator [label="Component\nReport Generator\nevaluation/report.py\nSerializes aggregated results to\nHTML and JSON", fillcolor="#FEF3C7"];
+}
+
+eval_controller -> model_resolver [label="requires eval model"];
+eval_controller -> identity_setup [label="ensures identity sampler"];
+eval_controller -> real_loader [label="loads real splits"];
+eval_controller -> reference_profiler [label="builds or loads references"];
+eval_controller -> transformer_generator [label="builds primary generator"];
+eval_controller -> markov_baseline [label="builds baseline"];
+eval_controller -> orchestrator [label="starts evaluation"];
+
+model_store -> model_resolver [label="model.pt"];
+model_store -> identity_setup [label="identity_sampler.pkl"];
+identity_setup -> model_store [label="creates sampler if missing"];
+clean_store -> real_loader [label="real session data"];
+cache_store -> real_loader [label="current vocab"];
+real_loader -> reference_profiler [label="train and val splits"];
+reference_profiler -> ref_store [label="reference profiles"];
+ref_store -> transformer_generator [label="legal bigrams"];
+model_store -> transformer_generator [label="checkpoint and sampler"];
+clean_store -> markov_baseline [label="real Parquet source"];
+
+transformer_generator -> orchestrator [label="primary synthetic generator"];
+markov_baseline -> orchestrator [label="baseline generator"];
+real_loader -> orchestrator [label="real train, val, optional test"];
+ref_store -> orchestrator [label="train and val references"];
+orchestrator -> metric_evaluators [label="sessions and references"];
+metric_evaluators -> model_store [label="GRU4Rec checkpoints"];
+orchestrator -> synth_store [label="saved sessions and samples"];
+orchestrator -> report_generator [label="aggregated result"];
+report_generator -> report_store [label="HTML and JSON"];
+report_store -> researcher [label="metrics report"];
+
+}

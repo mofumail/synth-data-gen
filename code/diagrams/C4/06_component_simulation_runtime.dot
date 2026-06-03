@@ -1,0 +1,72 @@
+digraph c4_component_simulation_runtime {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.8,
+  nodesep=0.55,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=LR;
+label="C4 Level 3 - Component View: Long-run Simulation Runtime";
+
+model_store [label="ContainerDb\nModel Store\npt / pkl\nconfigured eval model and identity sampler", shape=folder, fillcolor="#F2F4F7"];
+expected_ref [label="ContainerDb\nExpected Reference Store\njoblib\nsimulation expects output/reference_store.joblib;\nevaluation writes suffixed vK stores", shape=folder, fillcolor="#FEE4E2"];
+synth_store [label="ContainerDb\nSynthetic Batch Store\nParquet\noutput/synthetic/synthetic_batch_*.parquet", shape=folder, fillcolor="#F2F4F7"];
+
+subgraph cluster_container {
+  label="Container Boundary\nLong-run Simulation Runtime";
+  fontname="Inter,Arial,sans-serif";
+  fontsize=13;
+  color="#98A2B3";
+  penwidth=1.2;
+  style="rounded,dashed";
+  margin=18;
+
+  orchestrator [label="Component\nSimulation Orchestrator\nsimulation/orchestrator.py\nCoordinates arrivals, identity seeds,\nper-user history, multiprocessing,\nand batch persistence", fillcolor="#DBEAFE", penwidth=2.0];
+  arrival_interface [label="Component\nArrival Model Interface\nsimulation/arrival/base.py\nDefines delay-generation contract", fillcolor="#E0F2FE"];
+  missing_arrivals [label="Component Note\nReferenced Arrival Implementations\nMMPPArrivalModel and TODArrivalModel\nare imported by orchestrator but not\npresent in the current repo", shape=note, fillcolor="#FEE4E2"];
+  identity_sampler [label="Component\nSimple Identity Sampler\nsimulation/identity/sampler.py\nLoads observed client_id/SKU seed pairs", fillcolor="#F5F3FF"];
+  session_generator [label="Component\nSession Generator\nsimulation/generator/session_generator.py\nLazy-loads model and runs batched\nautoregressive generation", fillcolor="#D1E9FF", penwidth=2.0];
+  transformer_inference [label="Component\nSessionTransformer Inference\nsimulation/generator/session_transformer.py\nSamples action, category/item,\nand temporal bins with history memory", fillcolor="#F0F9FF"];
+  validity_layer [label="Component\nValidity Layer\nsimulation/validity.py\nChecks non-empty sessions, monotonicity,\npurchase exposure, and legal bigrams", fillcolor="#ECFDF3"];
+  batch_writer [label="Component\nBatch Writer\nIn-memory event buffer and Parquet writer\nflushes synthetic_batch_*.parquet", fillcolor="#FEF3C7"];
+}
+
+orchestrator -> arrival_interface [label="requests inter-arrival delays"];
+arrival_interface -> missing_arrivals [style=dashed, label="current code imports"];
+orchestrator -> identity_sampler [label="requests seed identities"];
+model_store -> identity_sampler [label="identity_sampler.pkl"];
+orchestrator -> session_generator [label="client_id, seed SKU, start time,\nand user history"];
+model_store -> session_generator [label="model.pt"];
+session_generator -> transformer_inference [label="batched generation"];
+transformer_inference -> validity_layer [label="generated session"];
+expected_ref -> validity_layer [style=dashed, label="legal bigrams if expected file exists"];
+validity_layer -> session_generator [label="valid session or []"];
+session_generator -> batch_writer [label="synthetic events"];
+batch_writer -> orchestrator [label="updates per-user history"];
+batch_writer -> synth_store [label="writes batch Parquets"];
+
+}

@@ -1,0 +1,89 @@
+digraph c4_container {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.8,
+  nodesep=0.55,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="C4 Level 2 - Container View";
+
+researcher [label="Person\nResearcher", shape=ellipse, fillcolor="#E0F2FE", penwidth=1.8];
+raw_data [label="External System\nRaw Synerise Event Data", shape=cylinder, fillcolor="#FFF7ED"];
+product_props [label="External System\nProduct Properties", shape=cylinder, fillcolor="#FFF7ED"];
+wandb [label="External System\nWeights & Biases", fillcolor="#F5F3FF"];
+
+subgraph cluster_pipeline {
+  label="Software System Boundary\nSynthetic E-commerce Session Simulation Pipeline";
+  fontname="Inter,Arial,sans-serif";
+  fontsize=13;
+  color="#98A2B3";
+  penwidth=1.2;
+  style="rounded,dashed";
+  margin=18;
+
+  cli [label="Container\nPipeline CLI Runner\nPython\nRuns configured stages and evaluation flags", fillcolor="#DBEAFE", penwidth=2.0];
+  ingestion [label="Container\nIngestion and Data Preparation\nPython / Polars\nCleans events, builds vocab/cache artifacts,\nand computes SVD-PQ tokens", fillcolor="#E0F2FE"];
+  training [label="Container\nTraining\nPyTorch\nTrains SessionTransformer and selects\nbest checkpoint", fillcolor="#E0F2FE"];
+  evaluation [label="Container\nEvaluation and Reporting\nPython / PyTorch\nGenerates synthetic sessions and computes\nfidelity, validity, and utility metrics", fillcolor="#E0F2FE"];
+  simulation [label="Container\nLong-run Simulation Runtime\nPython / multiprocessing / PyTorch\nGenerates batch Parquets from arrivals,\nidentities, model inference, and validity", fillcolor="#E0F2FE"];
+  clean_store [label="ContainerDb\nClean Event Store\nParquet\nevents_clean.parquet and events_test.parquet", shape=cylinder, fillcolor="#ECFDF3"];
+  cache_store [label="ContainerDb\nFeature and Vocabulary Cache\njoblib / numpy\nsku2idx, cat2idx, cat pools,\nSKU properties, SVD-PQ tokens, sessions", shape=folder, fillcolor="#F2F4F7"];
+  model_store [label="ContainerDb\nModel Store\npt / yaml / pkl\nSessionTransformer checkpoints,\nidentity sampler, GRU4Rec checkpoints", shape=folder, fillcolor="#F2F4F7"];
+  ref_store [label="ContainerDb\nReference Store\njoblib\nreference_store_vK and\nval_reference_store_vK profiles", shape=folder, fillcolor="#F2F4F7"];
+  synth_store [label="ContainerDb\nSynthetic Session Store\nParquet\nTransformer, Markov, TRTR samples,\nand simulation batches", shape=folder, fillcolor="#F2F4F7"];
+  reports [label="ContainerDb\nReport Store\nHTML / JSON\noutput/models/<eval_model>/reports/**", shape=folder, fillcolor="#FEF3C7"];
+}
+
+researcher -> cli [label="runs stages and evaluation commands"];
+raw_data -> ingestion [label="raw event streams"];
+product_props -> ingestion [label="product metadata"];
+cli -> ingestion [label="preprocess and svdpq stages"];
+cli -> training [label="train stage"];
+cli -> evaluation [label="evaluate stage"];
+
+ingestion -> clean_store [label="writes cleaned train/val/test sessions"];
+ingestion -> cache_store [label="writes vocab, properties, tokens, caches"];
+clean_store -> training [label="train and validation sessions"];
+cache_store -> training [label="vocab, properties, optional SVD-PQ tokens"];
+training -> model_store [label="writes best checkpoint and config"];
+training -> wandb [label="logs training and validation metrics"];
+
+model_store -> evaluation [label="model under test and samplers"];
+clean_store -> evaluation [label="real train/val/test splits"];
+cache_store -> evaluation [label="current vocabulary"];
+evaluation -> ref_store [label="builds or loads reference profiles"];
+evaluation -> synth_store [label="writes generated sessions and samples"];
+evaluation -> model_store [label="writes identity sampler and GRU4Rec checkpoints"];
+evaluation -> reports [label="writes HTML and JSON reports"];
+evaluation -> researcher [label="reports metrics"];
+
+model_store -> simulation [label="loads eval model and identity sampler"];
+ref_store -> simulation [style=dashed, label="legal bigrams only if expected\nreference_store.joblib exists"];
+simulation -> synth_store [label="writes synthetic_batch_*.parquet"];
+
+}

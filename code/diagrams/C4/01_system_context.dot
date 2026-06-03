@@ -1,0 +1,53 @@
+digraph c4_system_context {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.55,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=LR;
+label="C4 Level 1 - System Context";
+
+researcher [label="Person\nResearcher\nRuns experiments and reviews metrics", shape=ellipse, fillcolor="#E0F2FE", penwidth=1.8];
+pipeline [label="Software System\nSynthetic E-commerce Session\nSimulation Pipeline\nGenerates and evaluates synthetic\ninteraction sessions", fillcolor="#DBEAFE", penwidth=2.4];
+
+raw_data [label="External System\nRaw Synerise Event Data\npage_visit, search_query,\nadd_to_cart, remove_from_cart,\nproduct_buy", shape=cylinder, fillcolor="#FFF7ED"];
+product_props [label="External System\nProduct Properties\nsku, category, price, name", shape=cylinder, fillcolor="#FFF7ED"];
+wandb [label="External System\nWeights & Biases\nTraining metrics and diagnostics", fillcolor="#F5F3FF"];
+artifact_store [label="External Data Store\nLocal Artifact Filesystem\npipeline/output/**", shape=folder, fillcolor="#F2F4F7"];
+report_store [label="External Data Store\nEvaluation Report Store\nHTML and JSON reports", shape=folder, fillcolor="#FEF3C7"];
+
+researcher -> pipeline [label="runs CLI stages and selects eval_model"];
+raw_data -> pipeline [label="provides raw events"];
+product_props -> pipeline [label="provides product metadata"];
+pipeline -> artifact_store [label="writes datasets, caches, checkpoints,\nsamplers, synthetic sessions"];
+pipeline -> report_store [label="writes evaluation reports"];
+pipeline -> wandb [label="logs training metrics"];
+researcher -> report_store [label="reviews thesis metrics"];
+researcher -> artifact_store [label="inspects and reuses artifacts"];
+
+}

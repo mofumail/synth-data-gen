@@ -1,0 +1,68 @@
+digraph c4_component_ingestion {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.8,
+  nodesep=0.55,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=LR;
+label="C4 Level 3 - Component View: Ingestion and Data Preparation";
+
+raw_data [label="External System\nRaw Synerise Event Data", shape=cylinder, fillcolor="#FFF7ED"];
+product_props [label="External System\nProduct Properties", shape=cylinder, fillcolor="#FFF7ED"];
+subgraph cluster_container {
+  label="Container Boundary\nIngestion and Data Preparation";
+  fontname="Inter,Arial,sans-serif";
+  fontsize=13;
+  color="#98A2B3";
+  penwidth=1.2;
+  style="rounded,dashed";
+  margin=18;
+
+  preprocess [label="Component\nPreprocess CLI\npreprocess.py\nNormalizes, deduplicates, sessionizes,\nsplits train/val/test, joins metadata,\nand builds category vocabulary", fillcolor="#DBEAFE", penwidth=2.0];
+  dataset [label="Component\nDataset and Cache Builder\ningestion/dataset.py\nBuilds SessionDataset, InteractionGenerator,\nSKU vocab, SKU properties, category pools,\nand session caches", fillcolor="#E0F2FE"];
+  svdpq [label="Component\nSVD-PQ Tokenizer\ningestion/svdpq.py\nBuilds weighted user-SKU matrix,\nSVD factors, quantized SKU tokens,\nand cold-start fallback tokens", fillcolor="#E0F2FE"];
+}
+
+clean_store [label="ContainerDb\nClean Event Store\nParquet\nevents_clean.parquet and events_test.parquet", shape=cylinder, fillcolor="#ECFDF3"];
+cache_store [label="ContainerDb\nFeature and Vocabulary Cache\njoblib / numpy\ncat2idx, sku2idx, cat_sku_pools,\nsku_properties, session_cache_*", shape=folder, fillcolor="#F2F4F7"];
+svdpq_store [label="ContainerDb\nSVD-PQ Token Store\njoblib\nsku_tokens_vK.joblib", shape=folder, fillcolor="#F2F4F7"];
+
+raw_data -> preprocess [label="event Parquets"];
+product_props -> preprocess [label="category, price, name"];
+preprocess -> clean_store [label="clean train/val/test sessions"];
+preprocess -> cache_store [label="category vocabulary"];
+
+clean_store -> dataset [label="sessionized events"];
+product_props -> dataset [label="SKU properties"];
+dataset -> cache_store [label="vocab, properties, category pools,\nsession caches"];
+
+clean_store -> svdpq [label="training item interactions"];
+cache_store -> svdpq [label="SKU vocab and category pools"];
+svdpq -> svdpq_store [label="SVD-PQ item tokens"];
+
+}

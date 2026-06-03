@@ -1,0 +1,17 @@
+C4Context
+title C4 Level 1 - System Context
+
+System(pipeline, "Synthetic E-commerce Session Simulation Pipeline", "Generates and evaluates synthetic interaction sessions")
+
+System_Ext(raw_data, "Raw Synerise Event Data", "page_visit, search_query, add_to_cart, remove_from_cart, product_buy")
+System_Ext(product_props, "Product Properties", "sku, category, price, name")
+System_Ext(wandb, "Weights & Biases", "Training metrics and diagnostics")
+SystemDb_Ext(artifact_store, "Local Artifact Filesystem", "pipeline/output/**")
+SystemDb_Ext(report_store, "Evaluation Report Store", "HTML and JSON reports")
+
+Rel(raw_data, pipeline, "Provides raw events")
+Rel(product_props, pipeline, "Provides product metadata")
+Rel(pipeline, artifact_store, "Writes datasets, caches, checkpoints, samplers, synthetic sessions")
+Rel(pipeline, report_store, "Writes evaluation reports")
+Rel(pipeline, wandb, "Logs training metrics")
+UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")

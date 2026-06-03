@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C4 Level 3 - Training Components</title>
+  <style>
+    body { font-family: Inter, Arial, sans-serif; margin: 0; background: #fff; color: #1f2937; }
+    header { padding: 1rem 1.25rem; border-bottom: 1px solid #e5e7eb; }
+    main { padding: 1rem; overflow: auto; }
+    a { color: #2563eb; text-decoration: none; }
+    pre.mermaid { margin: 0; }
+  </style>
+  <script type="module">
+    import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+    mermaid.initialize({ startOnLoad: true, securityLevel: "loose" });
+  </script>
+</head>
+<body>
+  <header><a href="index.html">C4 Mermaid</a> / 04 Component: Training</header>
+  <main>
+<pre class="mermaid">
+C4Component
+title C4 Level 3 - Component View: Training
+
+System_Ext(wandb, "Weights & Biases", "Training metrics and diagnostics")
+
+ContainerDb(clean_store, "Clean Event Store", "Parquet", "Train and validation sessions")
+ContainerDb(cache_store, "Feature and Vocabulary Cache", "joblib / numpy", "Vocab, category pools, SKU properties, optional SVD-PQ tokens, session caches")
+ContainerDb(model_store, "Model Store", "pt / yaml", "model.pt, model.yaml, .last_run, checkpoint metadata")
+
+Container_Boundary(training_container, "Training") {
+  Component(train_controller, "Training Controller", "train.py", "Creates run folder, configures device, coordinates training, validation, logging, and checkpoint selection")
+  Component(interaction_loader, "Interaction Loader", "InteractionGenerator / SessionDataset", "Streams train and validation batches with session tensors and histories")
+  Component(model, "SessionTransformer", "simulation/generator/session_transformer.py", "Causal decoder with cross-session memory and action/category/item/temporal heads")
+  Component(objective, "Training Objective and Optimizer", "PyTorch", "Factored cross-entropy losses, optional popularity mitigation, AdamW, scheduler, autocast, grad clipping")
+  Component(selector, "Checkpoint Selector", "train.py", "Chooses best model by validation loss and applies early stopping")
+}
+
+Rel(clean_store, interaction_loader, "Train and validation sessions")
+Rel(cache_store, interaction_loader, "Session caches and vocab")
+Rel(cache_store, model, "Category pools, SKU properties, optional SVD-PQ tokens")
+
+Rel(train_controller, interaction_loader, "Loads batches")
+Rel(train_controller, model, "Trains model")
+Rel(model, objective, "Logits and item context")
+Rel(objective, train_controller, "Loss and optimizer updates")
+Rel(train_controller, selector, "Validation metrics")
+Rel(selector, model_store, "Promotes best checkpoint")
+Rel(train_controller, wandb, "Logs train and validation metrics")
+UpdateLayoutConfig($c4ShapeInRow="3", $c4BoundaryInRow="2")
+</pre>
+  </main>
+</body>
+</html>
