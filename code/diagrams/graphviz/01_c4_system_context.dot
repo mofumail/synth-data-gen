@@ -1,0 +1,55 @@
+digraph c4_system_context {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=LR;
+label="C4 System Context - Synthetic E-commerce Session Simulation Pipeline";
+
+
+researcher [label="Researcher / Thesis Author\nRuns uv CLI stages, selects models,\nreads reports", shape=ellipse, fillcolor="#E0F2FE"];
+raw [label="../DATA raw Synerise Parquets\npage_visit, search_query,\nadd_to_cart, remove_from_cart,\nproduct_buy", shape=cylinder, fillcolor="#FFF7ED"];
+props [label="../DATA/product_properties.parquet\nsku, category, price, quantized name", shape=cylinder, fillcolor="#FFF7ED"];
+wandb [label="Weights & Biases\ntraining metrics and diagnostics", shape=box, fillcolor="#F5F3FF"];
+mongo [label="MongoDB\nreal_* and synthetic_* collections", shape=cylinder, fillcolor="#ECFDF3"];
+filesystem [label="Local artifact store\npipeline/output/**", shape=folder, fillcolor="#F2F4F7"];
+reports [label="Evaluation reports\nHTML + JSON", shape=note, fillcolor="#FEF3C7"];
+pipeline [label="Simulation Pipeline\npreprocess -> SVD-PQ -> train -> evaluate -> simulate/upload", shape=box, penwidth=2.0, fillcolor="#DBEAFE"];
+
+researcher -> pipeline [label="executes main.py / stage CLIs\npasses --from, --stages, eval flags"];
+raw -> pipeline [label="raw events"];
+props -> pipeline [label="product metadata"];
+pipeline -> filesystem [label="clean/test Parquets, caches,\ncheckpoints, samplers, synthetic data"];
+pipeline -> wandb [label="logs train and validation losses"];
+pipeline -> reports [label="writes report-* outputs"];
+pipeline -> mongo [label="ingests real events and uploads synthetic batches"];
+researcher -> reports [label="reviews thesis metrics"];
+researcher -> filesystem [label="selects eval_model and artifacts"];
+
+}

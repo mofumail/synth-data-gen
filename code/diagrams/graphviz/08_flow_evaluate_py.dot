@@ -1,0 +1,66 @@
+digraph flow_evaluate_py {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="Code Flow - evaluate.py";
+
+
+start [label="parse_args()\n--max-train/val/test, --num-seeds,\n--base-seed, --n-sessions, --k,\n--final, --fidelity-only", shape=oval, fillcolor="#DBEAFE"];
+branch [label="--fidelity-only?", shape=diamond, fillcolor="#FEF3C7"];
+require [label="_require_eval_model()\nconfig eval_model must point to\nexisting output/models/<run>/model.pt", fillcolor="#FEE4E2"];
+report_dir [label="Create fresh report directory\nreports/report-<stamp>", shape=folder, fillcolor="#FEF3C7"];
+identity [label="ensure_identity_sampler()\nload or train CTGAN IdentityFactory", fillcolor="#F5F3FF"];
+real [label="RealDataLoader.load()\ntrain + val, optional locked test\nuses aggregate parquet cache", fillcolor="#E0F2FE"];
+filter [label="Filter real splits to current vocab\nOOV SKU -> None", fillcolor="#E0F2FE"];
+refs [label="build_ref_store()\nload or profile train ReferenceStore\nload or profile val ReferenceStore", shape=folder, fillcolor="#F2F4F7"];
+trim [label="Trim held-out split to item-only\nval in development, test in --final", fillcolor="#FEF3C7"];
+build_gen [label="build_transformer_generator()\nload model path, legal bigrams,\nValidityLayer, identity sampler path", fillcolor="#D1E9FF"];
+markov [label="Build MarkovSessionGenerator baseline\nfrom Parquet", fillcolor="#F0F9FF"];
+orch [label="EvaluationOrchestrator\nnum_seeds, base_seed, k,\nGRU4Rec save dir, model_tag", fillcolor="#DBEAFE"];
+eval [label="orchestrator.evaluate()\nper seed: transformer raw/post,\nMarkov, validity, fidelity,\nTSTR-T/TSTR-M/TRTR", fillcolor="#E0F2FE"];
+report [label="ReportGenerator\nHTML + JSON save\nstdout summary metrics", fillcolor="#FEF3C7"];
+done [label="Evaluation complete", shape=oval, fillcolor="#DBEAFE"];
+
+fid_require [label="fidelity-only setup\nrequire model, ensure identity,\nload train/val, filter vocab,\nprint length stats, build refs", fillcolor="#FFF7ED"];
+fid_gen [label="Generate single transformer sample\napply constraints, drop empty sessions", fillcolor="#FFF7ED"];
+fid_eval [label="Compute FidelityEvaluator\nvs train and vs val\nprint metrics only", fillcolor="#FFF7ED"];
+fid_done [label="Fidelity-only complete", shape=oval, fillcolor="#DBEAFE"];
+
+start -> branch;
+branch -> require [label="full evaluation"];
+require -> report_dir -> identity -> real -> filter -> refs -> trim -> build_gen -> markov -> orch -> eval -> report -> done;
+branch -> fid_require [label="--fidelity-only"];
+fid_require -> fid_gen -> fid_eval -> fid_done;
+refs -> build_gen [style=dashed, label="legal bigrams"];
+refs -> eval [style=dashed, label="train/val references"];
+filter -> eval [style=dashed, label="real_data"];
+
+}

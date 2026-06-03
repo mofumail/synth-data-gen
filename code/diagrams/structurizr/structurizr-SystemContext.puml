@@ -1,0 +1,31 @@
+@startuml
+title <size:24>System Context View: Session Generator Pipeline</size>\n<size:24>Level 1: the researcher drives the pipeline; the raw Synerise stream and a real held-out split feed it; MongoDB is an optional sink.</size>
+
+set separator none
+left to right direction
+
+<style>
+  root {
+    BackgroundColor: #ffffff
+    FontColor: #444444
+  }
+</style>
+
+!include <C4/C4>
+!include <C4/C4_Context>
+
+Person(Researcher, "Researcher", $descr="Configures the pipeline, runs it, and inspects the metrics.", $tags="", $link="")
+System(RawSyneriseeventstream, "Raw Synerise event stream", $descr="168 days of e-commerce interaction logs + product properties.", $tags="", $link="")
+System(Realheldoutsplit, "Real held-out split", $descr="Sibling input to evaluation; cleaned but not used in training.", $tags="", $link="")
+System(MongoDB, "MongoDB", $descr="Optional document store fed by the ingestor (per event-type collections).", $tags="", $link="")
+System(SessionGeneratorPipeline, "Session Generator Pipeline", $descr="Generates synthetic interaction sessions for downstream RecSys evaluation.", $tags="", $link="")
+
+Rel(RawSyneriseeventstream, SessionGeneratorPipeline, "raw events + product properties", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline, MongoDB, "optional bulk insert", $techn="", $tags="", $link="")
+Rel(Realheldoutsplit, SessionGeneratorPipeline, "real held-out split", $techn="", $tags="", $link="")
+Rel(Researcher, SessionGeneratorPipeline, "configures and runs", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline, Researcher, "fidelity / validity / TSTR metrics", $techn="", $tags="", $link="")
+
+SHOW_LEGEND(true)
+hide stereotypes
+@enduml

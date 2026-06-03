@@ -1,0 +1,83 @@
+digraph flow_autoregressive_generation {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="Autoregressive Generation Flow - Identity, History, Transformer, Validity";
+
+
+seed [label="Identity seed\n(client_id, sku)\nfrom CTGAN or observed-pair sampler", shape=oval, fillcolor="#F5F3FF"];
+start_time [label="Session start time\nuniform 30-day window in evaluation\nor arrival-model delay in simulation", fillcolor="#FEF3C7"];
+history_lookup [label="History lookup\n_user_registry / user_history_buffer\nlast HISTORY_WINDOW events", fillcolor="#FEF3C7"];
+batch_inputs [label="Batch inputs\n(client_id, seed sku, start_dt, history)", fillcolor="#E0F2FE"];
+load_model [label="SessionGenerator lazy load\nSessionTransformer.load(), sku2idx/idx2sku,\ncat SKU pools, valid transitions", fillcolor="#D1E9FF"];
+memory [label="Encode cross-session memory\nhistory.encode() or zero memory", fillcolor="#F0F9FF"];
+seed_tokens [label="Seed token stream\npage_visit action, seed SKU,\ndelta=0, category=PAD", fillcolor="#F0F9FF"];
+loop [label="For step < max_steps\nuntil EOS or all done", shape=diamond, fillcolor="#FEF3C7"];
+decoder [label="Build embeddings + causal mask\nTransformerDecoder over current tokens\ncross-attend to history memory", fillcolor="#D1E9FF"];
+action [label="Sample next action\nActionHead softmax temperature\nEOS may stop session", fillcolor="#E0F2FE"];
+is_item [label="Item-bearing action?", shape=diamond, fillcolor="#FEF3C7"];
+category [label="Sample category\nCategoryHead conditioned on action\nmask empty SKU pools", fillcolor="#E0F2FE"];
+item [label="Sample item\nflat vocab, category pool,\nor SVD-PQ token scorer\n(hamming or log_prob)", fillcolor="#E0F2FE"];
+no_item [label="Set SKU/category to None/PAD\nfor page_visit/search/EOS", fillcolor="#E0F2FE"];
+temporal [label="Sample temporal bin\nTemporalHead conditioned on action + item\nconvert bin to seconds", fillcolor="#E0F2FE"];
+emit [label="Emit event dict\nclient_id, event_type, sku,\ntimestamp, category", fillcolor="#ECFDF3"];
+append [label="Append sampled token\nto action/item/delta/category streams", fillcolor="#F0F9FF"];
+validity [label="Post-generation ValidityLayer\nnon-empty, monotonic timestamps,\npurchase exposure, legal bigrams", fillcolor="#ECFDF3"];
+empty [label="Invalid session -> [] placeholder\ncounted in validity metrics\nfiltered before fidelity/TSTR", fillcolor="#FEE4E2"];
+registry [label="Valid session extends per-user history\nfor later generated sessions", fillcolor="#FEF3C7"];
+out [label="Synthetic sessions\nused by evaluation, saved Parquets,\nor simulation batch upload", shape=oval, fillcolor="#DBEAFE"];
+
+seed -> batch_inputs;
+start_time -> batch_inputs;
+history_lookup -> batch_inputs;
+batch_inputs -> load_model;
+load_model -> memory;
+load_model -> seed_tokens;
+memory -> loop;
+seed_tokens -> loop;
+loop -> decoder [label="continue"];
+decoder -> action;
+action -> is_item;
+is_item -> category [label="yes"];
+category -> item;
+is_item -> no_item [label="no"];
+item -> temporal;
+no_item -> temporal;
+temporal -> emit;
+emit -> append;
+append -> loop [label="next step"];
+loop -> validity [label="EOS/max/all done"];
+validity -> empty [label="fail"];
+validity -> registry [label="pass"];
+registry -> out;
+empty -> out;
+
+}

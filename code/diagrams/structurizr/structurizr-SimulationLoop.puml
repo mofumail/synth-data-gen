@@ -1,0 +1,53 @@
+@startuml
+title <size:24>Dynamic View: Session Generator Pipeline - Simulation runtime</size>\n<size:24>Code flow (simulation orchestrator): one generated session from arrival to disk.</size>
+
+set separator none
+top to bottom direction
+
+<style>
+  root {
+    BackgroundColor: #ffffff
+    FontColor: #444444
+  }
+</style>
+
+!include <C4/C4>
+!include <C4/C4_Context>
+!include <C4/C4_Container>
+!include <C4/C4_Component>
+
+System_Boundary("SessionGeneratorPipeline_boundary", "Session Generator Pipeline", $tags="") {
+  Container_Boundary("SessionGeneratorPipeline.Simulationruntime_boundary", "Simulation runtime", $tags="") {
+    Component(SessionGeneratorPipeline.Simulationruntime.Simulationorchestrator, "Simulation orchestrator", $techn="", $descr="simulation/orchestrator.py: time-stepped loop, multiprocessing pool, per-user history buffer, chunked parquet writer.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.MMPParrivalmodel, "MMPP arrival model", $techn="", $descr="simulation/arrival/mmpp.py: Markov-modulated Poisson process inter-arrival delays.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Identitysampler, "Identity sampler", $techn="", $descr="simulation/identity/sampler.py: SimpleIdentitySampler emits frequency-weighted (client_id, sku) seed pairs.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Sessiongenerator, "Session generator", $techn="", $descr="simulation/generator/session_generator.py: inference wrapper, lazy model load, batch autoregressive generation, validity post-filter.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Inputembedding, "Input embedding", $techn="", $descr="Sums action, item, dt, position, category, price and quantized-name embeddings.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Transformerbackbone, "Transformer backbone", $techn="", $descr="Causal decoder over the session prefix with cross-attention to the history memory.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Actionhead, "Action head", $techn="", $descr="Softmax over 5 actions + EOS.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Itemhead, "Item head", $techn="", $descr="Per iteration: flat / hierarchical / SVD-PQ item prediction (sec. 6.3).", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Temporalhead, "Temporal head", $techn="", $descr="Categorical over log-spaced dt bins.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Validitylayer, "Validity layer", $techn="", $descr="simulation/validity.py: illegal transitions, dt monotonicity, prior-exposure checks.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Simulationruntime.Outputlogwriter, "Output log writer", $techn="", $descr="Serializes validated sessions to synthetic parquet in chunks.", $tags="", $link="")
+  }
+
+  ContainerDb(SessionGeneratorPipeline.Syntheticlogstore, "Synthetic log store", $techn="Parquet", $descr="Generated session parquet shards.", $tags="", $link="")
+}
+
+ContainerDb(SessionGeneratorPipeline.Syntheticlogstore, "Synthetic log store", $techn="Parquet", $descr="Generated session parquet shards.", $tags="", $link="")
+
+Rel(SessionGeneratorPipeline.Simulationruntime.MMPParrivalmodel, SessionGeneratorPipeline.Simulationruntime.Simulationorchestrator, "1: inter-arrival delay", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Identitysampler, SessionGeneratorPipeline.Simulationruntime.Simulationorchestrator, "2: (client_id, sku) seed", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Simulationorchestrator, SessionGeneratorPipeline.Simulationruntime.Sessiongenerator, "3: seed + history", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Sessiongenerator, SessionGeneratorPipeline.Simulationruntime.Inputembedding, "4: session prefix", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Inputembedding, SessionGeneratorPipeline.Simulationruntime.Transformerbackbone, "5: embedded prefix", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Transformerbackbone, SessionGeneratorPipeline.Simulationruntime.Actionhead, "6: sample action", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Actionhead, SessionGeneratorPipeline.Simulationruntime.Itemhead, "7: cond. action -> sample item", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Itemhead, SessionGeneratorPipeline.Simulationruntime.Temporalhead, "8: cond. item -> sample dt", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Temporalhead, SessionGeneratorPipeline.Simulationruntime.Validitylayer, "9: check constraints", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Validitylayer, SessionGeneratorPipeline.Simulationruntime.Outputlogwriter, "10: validated event", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime.Outputlogwriter, SessionGeneratorPipeline.Syntheticlogstore, "11: session shard", $techn="", $tags="", $link="")
+
+SHOW_LEGEND(true)
+hide stereotypes
+@enduml

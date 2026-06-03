@@ -1,0 +1,37 @@
+@startuml
+title <size:24>Dynamic View: Session Generator Pipeline</size>\n<size:24>Code flow (evaluate.py): seed-loop evaluation across simulation and the metric evaluators.</size>
+
+set separator none
+left to right direction
+
+<style>
+  root {
+    BackgroundColor: #ffffff
+    FontColor: #444444
+  }
+</style>
+
+!include <C4/C4>
+!include <C4/C4_Context>
+!include <C4/C4_Container>
+
+System_Boundary("SessionGeneratorPipeline_boundary", "Session Generator Pipeline", $tags="") {
+  Container(SessionGeneratorPipeline.Simulationruntime, "Simulation runtime", $techn="PyTorch / multiprocessing", $descr="Arrivals + identities drive autoregressive sampling, gated by a hard-constraint validity layer.", $tags="", $link="")
+  Container(SessionGeneratorPipeline.Evaluation, "Evaluation", $techn="Python", $descr="Fidelity, validity, and TSTR-utility metrics over multiple seeds.", $tags="", $link="")
+  ContainerDb(SessionGeneratorPipeline.Cleaneventstore, "Clean event store", $techn="Parquet", $descr="events_clean.parquet (train+val), events_test.parquet.", $tags="", $link="")
+  ContainerDb(SessionGeneratorPipeline.Syntheticlogstore, "Synthetic log store", $techn="Parquet", $descr="Generated session parquet shards.", $tags="", $link="")
+  ContainerDb(SessionGeneratorPipeline.Referencestore, "Reference store", $techn="joblib", $descr="reference_store_v{K}.joblib (train + val profiles).", $tags="", $link="")
+}
+
+Person(Researcher, "Researcher", $descr="Configures the pipeline, runs it, and inspects the metrics.", $tags="", $link="")
+
+Rel(SessionGeneratorPipeline.Cleaneventstore, SessionGeneratorPipeline.Evaluation, "1: load real splits", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation, SessionGeneratorPipeline.Referencestore, "2: build / load reference store", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation, SessionGeneratorPipeline.Simulationruntime, "3: generate synthetic sessions", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime, SessionGeneratorPipeline.Syntheticlogstore, "4: synthetic log", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Syntheticlogstore, SessionGeneratorPipeline.Evaluation, "5: read synth + baseline", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation, Researcher, "6: fidelity / validity / TSTR -> report", $techn="", $tags="", $link="")
+
+SHOW_LEGEND(true)
+hide stereotypes
+@enduml

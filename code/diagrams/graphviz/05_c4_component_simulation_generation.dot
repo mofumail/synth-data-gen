@@ -1,0 +1,80 @@
+digraph c4_component_simulation_generation {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=LR;
+label="C4 Component View - Arrival, Identity, Generation, Validity, and Upload";
+
+
+sim_orch [label="SimulationOrchestrator\nlong-running synthetic simulator", fillcolor="#DBEAFE", penwidth=2.0];
+arrival_iface [label="ArrivalModel interface\nget_next_arrival_delay(), fit/save/load", fillcolor="#E0F2FE"];
+arrival_missing [label="Referenced implementations\nMMPPArrivalModel and TODArrivalModel\nnot present in current repo", fillcolor="#FEE4E2"];
+identity_simple [label="SimpleIdentitySampler\nobserved client_id/sku pairs\nfrequency-weighted legacy sampler", fillcolor="#F5F3FF"];
+identity_ctgan [label="CTGAN IdentityFactory\njoint client_id/sku generator\nused by evaluate.py generation", fillcolor="#F5F3FF"];
+history [label="user_history_buffer\nper-client deque, H=50", fillcolor="#FEF3C7"];
+pool [label="multiprocessing pool\nparallel _generate_session_worker", fillcolor="#E0F2FE"];
+session_gen [label="SessionGenerator\nlazy loads checkpoint\nruns batch autoregressive generation", fillcolor="#D1E9FF", penwidth=2.0];
+transformer [label="SessionTransformer.infer_batch()\nseed page_visit, decoder loop,\naction -> category/item -> temporal", fillcolor="#F0F9FF"];
+transition_mask [label="Pre-sampling constraints\nvalid_transitions/action mask\ninside model load/inference path", fillcolor="#ECFDF3"];
+validity [label="ValidityLayer post-filter\nmonotonicity, purchase exposure,\nlegal bigrams", fillcolor="#ECFDF3"];
+events [label="event_buffer\nsynthetic event dicts", fillcolor="#FEF3C7"];
+batches [label="output/synthetic/synthetic_batch_*.parquet", shape=folder, fillcolor="#F2F4F7"];
+uploader [label="UploaderService\npoll output/synthetic every 10s\nupload and archive batch files", fillcolor="#E0F2FE"];
+archive [label="output/synthetic/archive/**", shape=folder, fillcolor="#F2F4F7"];
+mongo [label="MongoDB synthetic_* collections\npage_visit, search_query,\nadd_to_cart, remove_from_cart,\nproduct_buy", shape=cylinder, fillcolor="#ECFDF3"];
+ref [label="ReferenceStore\nlegal bigrams for validity", shape=folder, fillcolor="#F2F4F7"];
+model [label="output/models/<eval_model>/model.pt\nSessionTransformer checkpoint", shape=folder, fillcolor="#F2F4F7"];
+sampler [label="output/models/identity_sampler.pkl", shape=folder, fillcolor="#F2F4F7"];
+
+sim_orch -> arrival_iface [label="load arrival model"];
+arrival_iface -> arrival_missing [style=dashed, label="current code references"];
+sim_orch -> identity_simple [label="load + sample seed identities"];
+sim_orch -> ref [label="load legal bigrams"];
+ref -> validity;
+sim_orch -> session_gen;
+model -> session_gen;
+sampler -> session_gen [style=dashed, label="evaluate.py generate() path"];
+identity_ctgan -> sampler [style=dashed, label="evaluation fits when missing"];
+identity_simple -> sampler [style=dashed, label="legacy fit/save path"];
+sim_orch -> history [label="lookup past events per client"];
+sim_orch -> pool [label="submit arrivals"];
+pool -> session_gen [label="client_id, sku, start_dt, history"];
+session_gen -> transformer;
+transformer -> transition_mask [style=dashed];
+transformer -> validity [label="completed session"];
+validity -> session_gen [label="invalid -> []"];
+session_gen -> events [label="valid events"];
+events -> history [label="extend per-client history"];
+events -> batches [label="save when buffer >= 10k\nor simulation ends"];
+batches -> uploader;
+uploader -> mongo;
+uploader -> archive [label="move processed files"];
+
+}

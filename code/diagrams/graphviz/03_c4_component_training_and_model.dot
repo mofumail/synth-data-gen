@@ -1,0 +1,98 @@
+digraph c4_component_training {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=LR;
+label="C4 Component View - train.py and SessionTransformer Training";
+
+
+train_cli [label="train.py::train(comment)\ncreate timestamped run folder\nwrite output/models/.last_run", fillcolor="#DBEAFE", penwidth=2.0];
+wandb [label="wandb.init + metrics\ntrain/*, val/*, optional tstr/*", fillcolor="#F5F3FF"];
+train_gen [label="InteractionGenerator(split=train)\nDataLoader batches", fillcolor="#E0F2FE"];
+val_gen [label="InteractionGenerator(split=val)\nfull validation split", fillcolor="#E0F2FE"];
+dataset [label="SessionDataset\nsession tensors: events, items,\ndeltas, categories, history, masks", fillcolor="#F0F9FF"];
+session_cache [label="output/session_cache_*\nflat numpy arrays + offsets", shape=folder, fillcolor="#F2F4F7"];
+vocab [label="vocab artifacts\nsku2idx, vocab_stats,\ncat2idx, cat_sku_pools", shape=folder, fillcolor="#F2F4F7"];
+aux [label="SKU auxiliary tables\nprice bucket + 16-token name", shape=folder, fillcolor="#F2F4F7"];
+svdpq_tokens [label="SVD-PQ tokens\nsku_tokens_vK.joblib", shape=folder, fillcolor="#F2F4F7"];
+
+model [label="SessionTransformer\ninput embedding sum + causal decoder\ncross-session history memory", fillcolor="#D1E9FF", penwidth=2.0];
+embeddings [label="Input embeddings\naction, item, temporal bin, position,\noptional category, price, name", fillcolor="#F0F9FF"];
+history [label="CrossSessionHistory\nH-window user history encoder", fillcolor="#F0F9FF"];
+heads [label="Prediction heads\naction, category, item, temporal", fillcolor="#F0F9FF"];
+item_modes [label="Item head modes\nflat full vocab | hierarchical cat pool | SVD-PQ factored tokens", fillcolor="#ECFDF3"];
+losses [label="Factored losses\naction CE, category CE,\nitem CE/SVD-PQ loss, temporal CE\noptional loss weights", fillcolor="#FEF3C7"];
+mitigation [label="Popularity mitigation\nitem inverse-frequency weights\ncategory logit adjustment", fillcolor="#FEF3C7"];
+optim [label="AdamW + CosineAnnealingLR\nbf16 autocast, grad clipping", fillcolor="#E0F2FE"];
+val_loop [label="Validation loop\nsame masked losses on val split", fillcolor="#E0F2FE"];
+checkpoint [label="Best checkpoint\nmodel.pt + model.yaml\nconfig snapshot + best metadata", shape=folder, fillcolor="#ECFDF3"];
+early [label="Early stopping\nval_loss or TSTR HR@K", fillcolor="#FEE4E2"];
+
+probe [label="Optional in-training TSTR probe\nIS_BEST_EVAL_ENABLED", fillcolor="#F5F3FF"];
+probe_real [label="Real val split + ReferenceStore\nfiltered to current vocab", shape=folder, fillcolor="#F2F4F7"];
+probe_gen [label="SessionGenerator candidate\nuses candidate model.pt + identity sampler", fillcolor="#F0F9FF"];
+probe_gru [label="GRU4Rec probe\ntrain synthetic, test real val\nHR@K/NDCG@K", fillcolor="#F0F9FF"];
+
+train_cli -> wandb;
+train_cli -> train_gen;
+train_cli -> val_gen;
+train_gen -> dataset;
+val_gen -> dataset;
+dataset -> session_cache [dir=both, label="load/build"];
+dataset -> vocab [dir=both, label="load/build"];
+dataset -> aux [dir=both, label="load/build"];
+svdpq_tokens -> train_cli [style=dashed, label="when item_head_mode=svdpq"];
+vocab -> train_cli;
+aux -> train_cli;
+train_cli -> model;
+model -> embeddings;
+model -> history;
+model -> heads;
+heads -> item_modes;
+train_gen -> model [label="teacher-forced batches"];
+model -> losses [label="logits + item context"];
+mitigation -> losses [style=dashed];
+losses -> optim;
+optim -> model [label="backprop update"];
+model -> val_loop;
+val_gen -> val_loop;
+val_loop -> early;
+losses -> wandb [label="train metrics"];
+val_loop -> wandb [label="val metrics"];
+early -> checkpoint [label="save best"];
+
+early -> probe [style=dashed, label="if probe epoch"];
+probe -> probe_real;
+probe -> probe_gen;
+probe_gen -> probe_gru;
+probe_gru -> early [style=dashed, label="HR@K drives is_best"];
+probe_gru -> wandb [style=dashed, label="tstr metrics"];
+
+}

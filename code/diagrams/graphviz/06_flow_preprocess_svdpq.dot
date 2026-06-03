@@ -1,0 +1,84 @@
+digraph flow_preprocess_svdpq {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="Data Preparation Flow - preprocess.py and ingestion/svdpq.py";
+
+
+start [label="Start: uv run python preprocess.py", shape=oval, fillcolor="#DBEAFE"];
+load_item [label="Load item-bearing Parquets\nadd_to_cart, remove_from_cart,\nproduct_buy\nselect client_id,timestamp,sku", fillcolor="#E0F2FE"];
+load_nonitem [label="Load non-item Parquets\nsearch_query, page_visit\nsample page_visit if above PAGE_VISIT_SAMPLE", fillcolor="#E0F2FE"];
+normalize [label="Normalize timestamps\nparse strings or strip timezone\nfilter DS_START..DS_END", fillcolor="#E0F2FE"];
+dedupe [label="Deduplicate retry duplicates\n(client_id,timestamp,sku) or\n(client_id,timestamp)", fillcolor="#E0F2FE"];
+merge [label="Concat all event types\nattach event_type and nullable sku", fillcolor="#E0F2FE"];
+sessionize [label="Sessionize by client\nnew session at first event or gap > SESSION_TIMEOUT_MIN", fillcolor="#E0F2FE"];
+drop_pv [label="Drop page_visit-only sessions\nkeep sessions with non-page_visit signal", fillcolor="#FEF3C7"];
+split [label="Split by session start\ntrain+val before VAL_CUTOFF\nlocked test at/after VAL_CUTOFF", fillcolor="#FEF3C7"];
+join_props [label="Join product_properties\ncategory and price on SKU", fillcolor="#E0F2FE"];
+cat_vocab [label="Build cat2idx.joblib\n0 PAD, 1 RARE,\n2..N regular categories by SKU count", fillcolor="#ECFDF3"];
+save_clean [label="Save events_clean.parquet\ntrain + validation sessions", shape=folder, fillcolor="#F2F4F7"];
+save_test [label="Save events_test.parquet\nlocked test split", shape=folder, fillcolor="#FEE4E2"];
+
+sv_start [label="Start: uv run python ingestion/svdpq.py", shape=oval, fillcolor="#DBEAFE"];
+sku_vocab [label="Load/build sku2idx + vocab_stats\nfrom training SKUs\nindex 0 = PAD/OOV", fillcolor="#ECFDF3"];
+matrix [label="Build weighted user-SKU matrix\ntraining item events only\nSVDPQ_EVENT_WEIGHTS", fillcolor="#E0F2FE"];
+damp [label="BM25-style frequency damping\nthen per-user L2 normalization", fillcolor="#E0F2FE"];
+svd [label="TruncatedSVD\nitem factors E [VOCAB_K, SVDPQ_T]", fillcolor="#E0F2FE"];
+quant [label="Quantize each SVD dimension\nuniform or quantile bins\nSVDPQ_V tokens per dimension", fillcolor="#E0F2FE"];
+cold [label="Cold-start fallback\nlow-interaction SKUs inherit\ncategory-centroid tokens", fillcolor="#FEF3C7"];
+save_tokens [label="Save sku_tokens_vK.joblib\n[VOCAB_K, SVDPQ_T]", shape=folder, fillcolor="#F2F4F7"];
+
+start -> load_item;
+start -> load_nonitem;
+load_item -> normalize;
+load_nonitem -> normalize;
+normalize -> dedupe;
+dedupe -> merge;
+merge -> sessionize;
+sessionize -> drop_pv;
+drop_pv -> split;
+split -> join_props;
+join_props -> cat_vocab;
+join_props -> save_clean;
+join_props -> save_test;
+save_clean -> sv_start [label="next pipeline stage"];
+cat_vocab -> sv_start [style=dashed, label="category pools later"];
+sv_start -> sku_vocab;
+save_clean -> sku_vocab;
+sku_vocab -> matrix;
+matrix -> damp;
+damp -> svd;
+svd -> quant;
+quant -> cold;
+cat_vocab -> cold [style=dashed, label="category pools"];
+cold -> save_tokens;
+
+}

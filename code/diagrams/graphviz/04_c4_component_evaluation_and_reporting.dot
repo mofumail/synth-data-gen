@@ -1,0 +1,88 @@
+digraph c4_component_evaluation {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="C4 Component View - evaluate.py, Metrics, Baselines, and Reports";
+
+
+eval_cli [label="evaluate.py\nfull evaluation or --fidelity-only", fillcolor="#DBEAFE", penwidth=2.0];
+require_model [label="_require_eval_model()\nvalidate config eval_model folder\nand model.pt", fillcolor="#FEE4E2"];
+identity [label="ensure_identity_sampler()\ntrain CTGAN IdentityFactory\nif identity_sampler.pkl is missing", fillcolor="#F5F3FF"];
+real_loader [label="RealDataLoader.load()\nstream aggregate caches into\ntrain, val, optional test sessions", fillcolor="#E0F2FE"];
+vocab_filter [label="filter_sessions_to_vocab()\nreplace OOV SKUs with None", fillcolor="#E0F2FE"];
+refs [label="ReferenceStore cache\ntrain + val profiles\nlegal bigrams, distributions,\nbias, diversity", shape=folder, fillcolor="#F2F4F7"];
+
+primary [label="Transformer SessionGenerator\ncheckpoint + ValidityLayer\nCTGAN identity seeds", fillcolor="#D1E9FF"];
+validity [label="ValidityLayer\nlegal action bigrams,\nmonotonic timestamps,\npurchase exposure", fillcolor="#FEF3C7"];
+markov [label="MarkovSessionGenerator\nbaseline from real Parquet", fillcolor="#F0F9FF"];
+orch [label="EvaluationOrchestrator\nmulti-seed loop, aggregation,\ncorrelations", fillcolor="#DBEAFE", penwidth=2.0];
+seed [label="Per seed workflow\ngenerate raw transformer,\nmeasure pre-validity,\ngenerate constrained,\nsave synthetic", fillcolor="#E0F2FE"];
+fid [label="FidelityEvaluator\nJSD action/popularity,\nKS length/delta,\nL1 action/item bigrams,\ndiversity, conversion,\ncart abandonment, coverage, Gini", fillcolor="#ECFDF3"];
+valid_checker [label="ValidityChecker\npre/post violation rates", fillcolor="#ECFDF3"];
+downstream [label="DownstreamEvaluator\nTSTR-T, TSTR-M, TRTR", fillcolor="#ECFDF3"];
+gru [label="GRU4RecAdapter\nlocal top-K vocab, GRU training,\nHR@K/NDCG@K on val or locked test", fillcolor="#F0F9FF"];
+aggregate [label="AggregatedResult\nmean/std across seeds\nfidelity->utility Pearson correlations", fillcolor="#FEF3C7"];
+report [label="ReportGenerator\nHTML report + JSON serialization", fillcolor="#FEF3C7"];
+synth [label="output/synthetic/*.parquet\ntransformer and markov sessions", shape=folder, fillcolor="#F2F4F7"];
+report_dir [label="output/models/<eval_model>/reports/report-*/\nevaluation_report.html\nevaluation_results.json", shape=folder, fillcolor="#FEF3C7"];
+final [label="--final\nuse locked events_test/test_split\nfor final thesis numbers only", fillcolor="#FEE4E2"];
+fidelity_only [label="--fidelity-only\nsingle generator path,\nskips Markov/GRU4Rec utility", fillcolor="#FFF7ED"];
+
+eval_cli -> require_model -> identity -> real_loader -> vocab_filter -> refs;
+eval_cli -> final [style=dashed, label="optional flag"];
+eval_cli -> fidelity_only [style=dashed, label="alternate path"];
+
+refs -> validity;
+validity -> primary;
+identity -> primary [style=dashed, label="identity sampler path"];
+require_model -> primary [style=dashed, label="model.pt"];
+eval_cli -> markov [style=dashed, label="baseline"];
+primary -> orch;
+markov -> orch;
+refs -> orch [label="train + val references"];
+real_loader -> orch [label="real splits"];
+
+orch -> seed;
+seed -> valid_checker [label="pre/post validity"];
+seed -> fid [label="fidelity vs train/val"];
+seed -> downstream [label="utility"];
+seed -> synth [label="save Parquets"];
+downstream -> gru;
+real_loader -> downstream [label="real val or test"];
+
+valid_checker -> aggregate;
+fid -> aggregate;
+gru -> aggregate;
+aggregate -> report -> report_dir;
+fidelity_only -> primary [style=dashed];
+fidelity_only -> fid [style=dashed, label="train + val only"];
+
+}

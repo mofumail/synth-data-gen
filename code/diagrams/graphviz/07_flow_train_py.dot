@@ -1,0 +1,81 @@
+digraph flow_train_py {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="Code Flow - train.py";
+
+
+start [label="parse_args()\n--comment optional", shape=oval, fillcolor="#DBEAFE"];
+run_folder [label="Create run name and folder\noutput/models/<MODEL_NAME>_<stamp>_<comment>\nwrite output/models/.last_run", fillcolor="#E0F2FE"];
+device [label="Select device\ncuda if available else cpu", fillcolor="#E0F2FE"];
+wandb [label="Initialize W&B\nlog config and define metrics", fillcolor="#F5F3FF"];
+load_train [label="Load train InteractionGenerator\nTRAIN_MAX_SESSIONS optional cap", fillcolor="#E0F2FE"];
+load_val [label="Load val InteractionGenerator\nalways full val split", fillcolor="#E0F2FE"];
+vocab [label="Load category/SKU artifacts\ncat2idx, sku2idx, cat_sku_pools,\nsku_properties, optional sku_tokens", fillcolor="#ECFDF3"];
+mitigation [label="Prepare optional priors\nitem inverse-frequency weights\ncategory logit adjustment", fillcolor="#FEF3C7"];
+model [label="Build SessionTransformer\nitem_head_mode: flat | hier | svdpq\nregister SKU category maps or SVD-PQ tokens", fillcolor="#D1E9FF"];
+optim [label="AdamW optimizer\nCosineAnnealingLR scheduler", fillcolor="#E0F2FE"];
+probe_setup [label="If IS_BEST_EVAL_ENABLED\nload ReferenceStore, identity sampler,\nreal val split filtered to vocab", fillcolor="#F5F3FF"];
+epoch [label="For each epoch", shape=diamond, fillcolor="#FEF3C7"];
+batch [label="For each train batch\nmove tensors and optional history to device", fillcolor="#E0F2FE"];
+targets [label="Build shifted targets\nvalid target mask\nitem_valid mask for item-bearing non-OOV events", fillcolor="#E0F2FE"];
+forward [label="bf16 autocast forward\nSessionTransformer returns\naction/category/temporal logits + item context", fillcolor="#D1E9FF"];
+loss [label="Compute losses\naction CE, temporal CE,\ncategory CE if present,\nitem loss via item head\napply optional loss weights", fillcolor="#FEF3C7"];
+step [label="Backprop step\nzero_grad, backward,\nclip grad norm, optimizer.step,\nscheduler.step", fillcolor="#E0F2FE"];
+val [label="Validation loop\nsame shifted masks and loss calculation\nno grad", fillcolor="#E0F2FE"];
+log [label="Print and log train/val metrics\naction/category/item/temporal/total,\nlr, grad_norm, time", fillcolor="#F5F3FF"];
+probe [label="Probe epoch?\nSave model_candidate.pt\nmove model to CPU\nrun TSTR probe\nrestore model to device", shape=diamond, fillcolor="#F5F3FF"];
+isbest_probe [label="Probe is_best\nHR@K mean improves best_hr", fillcolor="#ECFDF3"];
+isbest_loss [label="Loss is_best\nval_loss improves best_loss\nwhen probe disabled", fillcolor="#ECFDF3"];
+save [label="Save best checkpoint\nrename candidate or write model.pt\nwrite model.yaml config snapshot\nwith checkpoint metadata", shape=folder, fillcolor="#ECFDF3"];
+patience [label="Update patience counters\nearly stop when configured patience exceeded", fillcolor="#FEE4E2"];
+done [label="Training finished\nbest model available for evaluate.py", shape=oval, fillcolor="#DBEAFE"];
+
+start -> run_folder -> device -> wandb -> load_train -> load_val -> vocab -> mitigation -> model -> optim -> probe_setup -> epoch;
+epoch -> batch [label="next epoch"];
+batch -> targets;
+targets -> forward;
+forward -> loss;
+loss -> step;
+step -> batch [label="next batch"];
+batch -> val [label="epoch train done"];
+val -> log -> probe;
+probe -> isbest_probe [label="yes"];
+probe -> isbest_loss [label="no"];
+isbest_probe -> save;
+isbest_loss -> save;
+save -> patience;
+isbest_probe -> patience [style=dashed, label="no improvement"];
+isbest_loss -> patience [style=dashed, label="no improvement"];
+patience -> epoch [label="continue"];
+patience -> done [label="stop or last epoch"];
+
+}

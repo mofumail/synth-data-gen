@@ -1,0 +1,102 @@
+digraph c4_container_pipeline {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="C4 Container View - Pipeline Runtime and Artifact Stores";
+
+
+main [label="main.py\nEnd-to-end stage runner\npreprocess -> svdpq -> train -> evaluate", fillcolor="#DBEAFE", penwidth=2.0];
+config [label="config.py + config.yaml\npaths, splits, model hyperparams,\neval_model, sampling, GRU4Rec settings", shape=component, fillcolor="#EEF2FF"];
+
+raw [label="../DATA/*.parquet\nraw event streams", shape=cylinder, fillcolor="#FFF7ED"];
+props [label="../DATA/product_properties.parquet\ncategory, price, name", shape=cylinder, fillcolor="#FFF7ED"];
+preprocess [label="preprocess.py\nmerge, dedupe, sample page visits,\nsessionize, split train/val/test,\njoin product properties", fillcolor="#E0F2FE"];
+clean [label="output/events_clean.parquet\ntrain + val sessions", shape=cylinder, fillcolor="#ECFDF3"];
+test [label="output/events_test.parquet\nlocked final test split", shape=cylinder, fillcolor="#FEE4E2"];
+
+dataset [label="ingestion/dataset.py\nSessionDataset + InteractionGenerator\nSKU/category/property/session caches", fillcolor="#F0F9FF"];
+svdpq [label="ingestion/svdpq.py\nSVD-PQ item tokenizer", fillcolor="#E0F2FE"];
+caches [label="output cache artifacts\nsku2idx, vocab_stats, cat2idx,\ncat pools, SKU props, SVD-PQ tokens,\nReferenceStores, session_cache_*", shape=folder, fillcolor="#F2F4F7"];
+
+train [label="train.py\nSessionTransformer training\ncheckpoint and model.yaml snapshot", fillcolor="#E0F2FE"];
+wandb [label="W&B project\nthesis-session-transformer", shape=box, fillcolor="#F5F3FF"];
+models [label="output/models/**\nSessionTransformer, identity sampler,\nGRU4Rec checkpoints", shape=folder, fillcolor="#F2F4F7"];
+
+evaluate [label="evaluate.py\nfull / fidelity-only evaluation", fillcolor="#E0F2FE"];
+generator [label="simulation/generator/*\nSessionGenerator + SessionTransformer\nheads + cross-session history", fillcolor="#F0F9FF"];
+identity [label="simulation/identity/*\nCTGAN IdentityFactory\nSimpleIdentitySampler legacy", fillcolor="#F0F9FF"];
+evaluation [label="evaluation/*\nreference, fidelity, validity,\ndownstream GRU4Rec, reports", fillcolor="#F0F9FF"];
+reports [label="output/models/<eval_model>/reports/**\nHTML + JSON", shape=folder, fillcolor="#FEF3C7"];
+synth [label="output/synthetic/**\nseed outputs and simulation batches", shape=folder, fillcolor="#F2F4F7"];
+
+simulation [label="simulation/orchestrator.py\nlong-run synthetic batch simulator\narrival + identity + generation", fillcolor="#E0F2FE"];
+ingestion [label="ingestion/ingestor.py + uploader.py\nMongoDB real ingest and synthetic upload", fillcolor="#E0F2FE"];
+mongo [label="MongoDB\nreal_* / synthetic_* collections", shape=cylinder, fillcolor="#ECFDF3"];
+
+main -> preprocess [label="stage"];
+preprocess -> svdpq [label="stage"];
+svdpq -> train [label="stage"];
+train -> evaluate [label="stage"];
+config -> main [style=dashed, label="stage settings"];
+
+raw -> preprocess;
+props -> preprocess;
+preprocess -> clean;
+preprocess -> test;
+preprocess -> caches [label="cat2idx"];
+clean -> dataset;
+dataset -> caches [dir=both, label="load/build"];
+dataset -> train [label="batches"];
+clean -> svdpq [label="training interactions"];
+svdpq -> caches [label="sku_tokens_vK"];
+caches -> train;
+train -> models;
+train -> wandb [label="metrics", style=dashed, color="#7C3AED"];
+
+models -> evaluate;
+clean -> evaluate;
+test -> evaluate [label="--final only"];
+caches -> evaluate;
+generator -> evaluate [style=dashed, label="primary generator"];
+identity -> evaluate [style=dashed, label="identity sampler"];
+evaluation -> evaluate [style=dashed, label="metric/report modules"];
+evaluate -> reports;
+evaluate -> synth;
+evaluate -> models [label="identity sampler, GRU4Rec"];
+
+models -> simulation;
+caches -> simulation [label="legal bigrams / refs"];
+simulation -> synth [label="batch Parquets"];
+clean -> ingestion [label="real ingest"];
+synth -> ingestion [label="upload batches"];
+ingestion -> mongo [label="bulk insert"];
+
+}

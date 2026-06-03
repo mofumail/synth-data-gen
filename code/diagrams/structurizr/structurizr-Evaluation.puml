@@ -1,0 +1,61 @@
+@startuml
+title <size:24>Component View: Session Generator Pipeline - Evaluation</size>\n<size:24>Level 3: real data loading + reference profiling feed the seed-loop orchestrator across fidelity, validity, and downstream (TSTR) evaluators into a report.</size>
+
+set separator none
+top to bottom direction
+
+<style>
+  root {
+    BackgroundColor: #ffffff
+    FontColor: #444444
+  }
+</style>
+
+!include <C4/C4>
+!include <C4/C4_Context>
+!include <C4/C4_Container>
+!include <C4/C4_Component>
+
+Person(Researcher, "Researcher", $descr="Configures the pipeline, runs it, and inspects the metrics.", $tags="", $link="")
+
+System(Realheldoutsplit, "Real held-out split", $descr="Sibling input to evaluation; cleaned but not used in training.", $tags="", $link="")
+
+System_Boundary("SessionGeneratorPipeline_boundary", "Session Generator Pipeline", $tags="") {
+  Container_Boundary("SessionGeneratorPipeline.Evaluation_boundary", "Evaluation", $tags="") {
+    Component(SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, "Evaluation orchestrator", $techn="", $descr="evaluation/orchestrator.py: seed loop, metric aggregation (mean ± std), fidelity-utility correlation.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Evaluation.Realdataloader, "Real data loader", $techn="", $descr="evaluation/reference.py: RealDataLoader builds train/val/test RealData splits, filtered to vocab.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Evaluation.Referenceprofiler, "Reference profiler", $techn="", $descr="evaluation/reference.py: ReferenceProfiler -> ReferenceStore (action/item bigrams, distributions, bias, legal bigrams).", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Evaluation.Fidelityevaluator, "Fidelity evaluator", $techn="", $descr="evaluation/fidelity.py: JSD / KS / L1 / diversity / temporal / behavioral + bias metrics.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Evaluation.Downstreamevaluator, "Downstream evaluator", $techn="", $descr="evaluation/downstream.py: GRU4Rec adapter; TSTR-T, TSTR-M, TRTR (HR@K, NDCG@K).", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Evaluation.Markovbaseline, "Markov baseline", $techn="", $descr="evaluation/markov.py: MarkovSessionGenerator bigram baseline for TSTR-M.", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Evaluation.Validitychecker, "Validity checker", $techn="", $descr="evaluation/validity_checker.py: compliance rates (illegal transitions, monotonicity, purchase exposure).", $tags="", $link="")
+    Component(SessionGeneratorPipeline.Evaluation.Reportgenerator, "Report generator", $techn="", $descr="evaluation/report.py: aggregates seed results into HTML + JSON reports.", $tags="", $link="")
+  }
+
+  Container(SessionGeneratorPipeline.Simulationruntime, "Simulation runtime", $techn="PyTorch / multiprocessing", $descr="Arrivals + identities drive autoregressive sampling, gated by a hard-constraint validity layer.", $tags="", $link="")
+  ContainerDb(SessionGeneratorPipeline.Cleaneventstore, "Clean event store", $techn="Parquet", $descr="events_clean.parquet (train+val), events_test.parquet.", $tags="", $link="")
+  ContainerDb(SessionGeneratorPipeline.Syntheticlogstore, "Synthetic log store", $techn="Parquet", $descr="Generated session parquet shards.", $tags="", $link="")
+  ContainerDb(SessionGeneratorPipeline.Referencestore, "Reference store", $techn="joblib", $descr="reference_store_v{K}.joblib (train + val profiles).", $tags="", $link="")
+}
+
+Rel(SessionGeneratorPipeline.Cleaneventstore, SessionGeneratorPipeline.Evaluation.Realdataloader, "real splits", $techn="", $tags="", $link="")
+Rel(Realheldoutsplit, SessionGeneratorPipeline.Evaluation.Realdataloader, "held-out split", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Realdataloader, SessionGeneratorPipeline.Evaluation.Referenceprofiler, "train / val splits", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Referenceprofiler, SessionGeneratorPipeline.Referencestore, "reference profiles", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, SessionGeneratorPipeline.Simulationruntime, "generate N synth sessions / seed", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, SessionGeneratorPipeline.Evaluation.Markovbaseline, "generate baseline sessions", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Syntheticlogstore, SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, "synthetic log", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, SessionGeneratorPipeline.Evaluation.Fidelityevaluator, "synth vs reference", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, SessionGeneratorPipeline.Evaluation.Validitychecker, "compliance", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, SessionGeneratorPipeline.Evaluation.Downstreamevaluator, "TSTR-T / TSTR-M / TRTR", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Referenceprofiler, SessionGeneratorPipeline.Evaluation.Fidelityevaluator, "reference profile", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Realdataloader, SessionGeneratorPipeline.Evaluation.Downstreamevaluator, "real test split", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Markovbaseline, SessionGeneratorPipeline.Evaluation.Downstreamevaluator, "baseline sessions", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Evaluationorchestrator, SessionGeneratorPipeline.Evaluation.Reportgenerator, "aggregated results", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Evaluation.Reportgenerator, Researcher, "HTML / JSON report", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Simulationruntime, SessionGeneratorPipeline.Syntheticlogstore, "validated session log", $techn="", $tags="", $link="")
+Rel(SessionGeneratorPipeline.Referencestore, SessionGeneratorPipeline.Simulationruntime, "legal bigrams (validity)", $techn="", $tags="", $link="")
+
+SHOW_LEGEND(true)
+hide stereotypes
+@enduml

@@ -1,0 +1,96 @@
+digraph artifacts_data_lineage {
+
+graph [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=18,
+  labelloc=t,
+  margin=0.18,
+  pad=0.2,
+  ranksep=0.75,
+  nodesep=0.45,
+  splines=polyline,
+  bgcolor="white"
+];
+node [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=11,
+  shape=box,
+  style="rounded,filled",
+  color="#344054",
+  penwidth=1.2,
+  fillcolor="#F8FAFC",
+  margin="0.12,0.08"
+];
+edge [
+  fontname="Inter,Arial,sans-serif",
+  fontsize=10,
+  color="#475467",
+  arrowsize=0.75,
+  penwidth=1.1
+];
+
+rankdir=TB;
+label="Artifact and Data Lineage - From Raw Data to Reports and MongoDB";
+
+
+raw_events [label="../DATA event Parquets\n5 event streams", shape=cylinder, fillcolor="#FFF7ED"];
+product_props [label="../DATA/product_properties.parquet\ncategory, price, name tokens", shape=cylinder, fillcolor="#FFF7ED"];
+config [label="config.yaml/config.py\nall paths, hyperparams, splits", shape=note, fillcolor="#EEF2FF"];
+
+preprocess [label="preprocess.py\nsessionize, join metadata,\nsplit train/val/test", fillcolor="#E0F2FE"];
+clean [label="output/events_clean.parquet\ntrain+val sessions", shape=cylinder, fillcolor="#ECFDF3"];
+test [label="output/events_test.parquet\nlocked test sessions", shape=cylinder, fillcolor="#FEE4E2"];
+cat2idx [label="output/cat2idx.joblib\ncategory vocabulary", shape=folder, fillcolor="#F2F4F7"];
+
+dataset_cache [label="Dataset caches\nsession_cache_*_vK,\nvocab_stats_vK, sku2idx_vK,\ncat_sku_pools_vK,\nsku_properties_vK", shape=folder, fillcolor="#F2F4F7"];
+svdpq [label="output/sku_tokens_vK.joblib\nSVD-PQ item tokens", shape=folder, fillcolor="#F2F4F7"];
+
+model_run [label="output/models/<run>/\nmodel.pt, model.yaml", shape=folder, fillcolor="#ECFDF3"];
+last_run [label="output/models/.last_run\nmain.py lookup after train", shape=note, fillcolor="#FEF3C7"];
+identity [label="output/models/identity_sampler.pkl\nCTGAN or legacy identity sampler", shape=folder, fillcolor="#F5F3FF"];
+
+real_cache [label="output/real_sessions_agg_*/\ntrain.parquet, val.parquet,\noptional test.parquet", shape=folder, fillcolor="#F2F4F7"];
+refs [label="ReferenceStores\nreference_store_vK.joblib\nval_reference_store_vK.joblib", shape=folder, fillcolor="#F2F4F7"];
+synthetic [label="output/synthetic/*.parquet\ntransformer + Markov outputs\nand simulation batches", shape=folder, fillcolor="#F2F4F7"];
+gru [label="output/models/gru4rec/*.pt\nTSTR-T, TSTR-M, TRTR", shape=folder, fillcolor="#F2F4F7"];
+reports [label="report-*/evaluation_report.html\nreport-*/evaluation_results.json", shape=folder, fillcolor="#FEF3C7"];
+mongo_real [label="MongoDB real_* collections", shape=cylinder, fillcolor="#ECFDF3"];
+mongo_synth [label="MongoDB synthetic_* collections", shape=cylinder, fillcolor="#ECFDF3"];
+archive [label="output/synthetic/archive/**", shape=folder, fillcolor="#F2F4F7"];
+
+raw_events -> preprocess;
+product_props -> preprocess [label="category/price/name"];
+config -> preprocess [style=dashed, label="dates, splits, timeout"];
+preprocess -> clean;
+preprocess -> test;
+preprocess -> cat2idx;
+
+clean -> dataset_cache [label="InteractionGenerator"];
+cat2idx -> dataset_cache [label="category pools"];
+product_props -> dataset_cache [label="SKU props"];
+clean -> svdpq [label="weighted user-SKU matrix"];
+dataset_cache -> svdpq [label="vocab + pools"];
+
+dataset_cache -> model_run [label="train.py batches + aux tables"];
+svdpq -> model_run [label="if SVD-PQ mode"];
+model_run -> last_run;
+clean -> identity [label="fit identity sampler"];
+
+clean -> real_cache [label="RealDataLoader"];
+test -> real_cache [label="--final only"];
+real_cache -> refs [label="ReferenceProfiler"];
+model_run -> synthetic [label="SessionGenerator"];
+identity -> synthetic [label="seed identities"];
+refs -> synthetic [label="validity legal bigrams"];
+
+synthetic -> gru [label="TSTR-T/TSTR-M"];
+real_cache -> gru [label="TRTR + real holdout"];
+refs -> reports [label="fidelity references"];
+synthetic -> reports [label="saved sessions"];
+gru -> reports [label="utility metrics"];
+
+clean -> mongo_real [label="DataIngester"];
+synthetic -> mongo_synth [label="UploaderService"];
+synthetic -> archive [label="after upload"];
+
+}
