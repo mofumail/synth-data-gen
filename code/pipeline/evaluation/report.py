@@ -45,12 +45,18 @@ class ReportGenerator:
             ("Conv. rate delta",    "conversion_rate_delta",    "[0, 1]", "↓ lower is better"),
             ("Cart abandon. delta", "cart_abandonment_delta",   "[0, 1]", "↓ lower is better"),
         ]
+        # train_only=True rows are shown for the training reference only. Item
+        # coverage (and its matched-N denominator) is intrinsic to the generated
+        # catalogue and is reported once against the training pool the model
+        # learned: a validation-pool denominator measures two-week catalogue
+        # churn, not fidelity.
         BIAS_METRICS = [
-            ("Item coverage",     "item_coverage",          "ratio",  "1.0 = ideal (synth/real unique at same N)"),
-            ("Unique SKUs (synth)",       "unique_synth_skus",        "count", "catalog-% = this / VOCAB_K"),
-            ("Unique SKUs (real matched)","unique_real_matched_skus", "count", "denom of Item coverage"),
-            ("JSD (popularity)",  "popularity_jsd",         "[0, 1]", "↓ lower is better"),
-            ("Gini coeff. delta", "gini_coefficient_delta", "[0, 1]", "↓ lower is better"),
+            # (label, attr, range, direction, train_only)
+            ("Item coverage",     "item_coverage",          "ratio",  "synth/real unique at matched N (training reference)", True),
+            ("Unique SKUs (synth)",       "unique_synth_skus",        "count", "catalog-% = this / VOCAB_K", False),
+            ("Unique SKUs (real matched)","unique_real_matched_skus", "count", "denom of Item coverage", True),
+            ("JSD (popularity)",  "popularity_jsd",         "[0, 1]", "↓ lower is better", False),
+            ("Gini coeff. delta", "gini_coefficient_delta", "[0, 1]", "↓ lower is better", False),
         ]
 
         def _col(mean, std, attr, bias=False):
@@ -58,7 +64,8 @@ class ReportGenerator:
             obj_s = std.bias  if bias else std
             return mean_std(getattr(obj_m, attr), getattr(obj_s, attr))
 
-        def _fidelity_compare_table(t_mean, t_std, m_mean, m_std, rr_mean, rr_std):
+        def _fidelity_compare_table(t_mean, t_std, m_mean, m_std, rr_mean, rr_std,
+                                    include_intrinsic_coverage: bool):
             rows = []
             for label, attr, rng, direction in FIDELITY_METRICS:
                 rows.append([label,
@@ -66,7 +73,9 @@ class ReportGenerator:
                              _col(m_mean,  m_std,  attr),
                              _col(rr_mean, rr_std, attr),
                              rng, direction])
-            for label, attr, rng, direction in BIAS_METRICS:
+            for label, attr, rng, direction, train_only in BIAS_METRICS:
+                if train_only and not include_intrinsic_coverage:
+                    continue   # coverage is intrinsic; reported once vs the train reference
                 rows.append([label,
                              _col(t_mean,  t_std,  attr, bias=True),
                              _col(m_mean,  m_std,  attr, bias=True),
@@ -81,11 +90,13 @@ class ReportGenerator:
             ar.fidelity_train_mean,        ar.fidelity_train_std,
             ar.fidelity_markov_train_mean, ar.fidelity_markov_train_std,
             ar.fidelity_trtr_train_mean,   ar.fidelity_trtr_train_std,
+            include_intrinsic_coverage=True,
         )
         fidelity_val_html = _fidelity_compare_table(
             ar.fidelity_val_mean,        ar.fidelity_val_std,
             ar.fidelity_markov_val_mean, ar.fidelity_markov_val_std,
             ar.fidelity_trtr_val_mean,   ar.fidelity_trtr_val_std,
+            include_intrinsic_coverage=False,
         )
 
         # --- Validity table ---

@@ -46,10 +46,10 @@ category_rare_threshold: 5   # categories with <= this many SKUs are collapsed t
 #   svdpq - Iter 3: SVD product-quantized factored softmax
 # `svdpq_enabled` below is kept as a back-compat alias and is auto-derived
 # from this mode in config.py.
-item_head_mode:         svdpq
+item_head_mode:         flat
 
 # SVD-PQ item tokenizer (offline: ingestion/svdpq.py)
-svdpq_enabled:          true
+svdpq_enabled:          false
 svdpq_t:                4         # SVD dims -> tokens per item  ;;; Try : 2, 8, 4, 16
 svdpq_v:                512         # bins per dim                 ;;; Try: ,2048 256, 512, 128
 svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token peakedness so the t-factor joint doesn't collapse to winner-take-all. 0.0 = off.
@@ -58,7 +58,7 @@ svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token p
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
 
-eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_210526-12-12-18_iter3_svdpq_base_200k
+eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_280426-21-59-47_item_loss_freq_alpha_0.5
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads
@@ -119,7 +119,7 @@ is_best_eval_k:              10
 
 # Final-evaluation scale (consumed by evaluate.py once training is done).
 final_eval_n_sessions: 500000
-final_eval_seeds:      [42, 43, 44]
+final_eval_seeds:      [42, 43, 44, 45, 46]
 
 # GRU4Rec downstream evaluator
 gru4rec_embed_dim:   64

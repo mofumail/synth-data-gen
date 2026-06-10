@@ -258,17 +258,28 @@ class RealDataLoader:
             if include_test:
                 print("  Aggregating test split (LOCKED - final evaluation only) ...")
                 test_path = str(test_parquet_path or TEST_PARQUET)
-                df_test = pl.read_parquet(
-                    test_path,
-                    columns=["client_id", "timestamp", "event_type", "session_id", "sku"],
-                ).sort(["session_id", "timestamp"])
-                df_test = df_test.join(
-                    df_test.group_by("session_id").agg(pl.col("timestamp").min().alias("session_start")),
-                    on="session_id",
+                # Aggregate test with the same pipeline as full_agg so the cached
+                # schema (session_id, client_id, event_types, skus, timestamps)
+                # matches train/val. The test split is a single week (~Dec 1-8),
+                # small enough to collect() without the streaming sink.
+                test_full = (
+                    pl.scan_parquet(test_path)
+                    .select(["client_id", "timestamp", "event_type", "session_id", "sku"])
+                    .group_by("session_id")
+                    .agg(
+                        pl.col("client_id").first(),
+                        pl.col("event_type").sort_by("timestamp").alias("event_types"),
+                        pl.col("sku").sort_by("timestamp").alias("skus"),
+                        pl.col("timestamp").sort().alias("timestamps"),
+                        pl.col("timestamp").min().alias("session_start"),
+                        pl.len().alias("n"),
+                    )
+                    .filter(pl.col("n") >= min_length)
+                    .collect()
                 )
-                test_agg = make_agg(df_test, pl.lit(True), max_test_sessions)
+                test_agg = make_agg(test_full, pl.lit(True), max_test_sessions)
                 test_agg.write_parquet(cache_dir / "test.parquet")
-                del df_test, test_agg
+                del test_full, test_agg
 
             # Free all Arrow before the dict build — dict memory must not stack on it.
             del full_agg, train_agg, val_agg
