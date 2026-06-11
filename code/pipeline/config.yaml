@@ -8,10 +8,10 @@ val_cutoff:   "2022-12-01"
 
 # Sessionization
 session_timeout_min: 30        # inactivity gap (minutes) that starts a new session
-history_window:      16        # max past events used as cross-session context (covers 93.9% of users)
+history_window:      16        # max past events used as cross-session context (H); coverage per H: thesis tab:history-window-coverage
 
 # Vocabulary
-vocab_k: 200000               # top-K SKUs covering ~90% of training item events
+vocab_k: 200000               # top-K item vocabulary cap
 
 # Temporal head
 n_temporal_bins: 64            # log-spaced bins between temporal_min_s and session_timeout
@@ -34,11 +34,11 @@ train_n_layers:     4          # number of decoder layers
 train_n_heads:      4          # attention heads (must divide d_model)
 train_max_sessions: null       # null = use all sessions; set int for smoke tests
 train_num_workers:  4          # dataset is built in main process; workers only run __getitem__
-train_patience:     5          # in TSTR mode: probes (not epochs) without HR improvement before stop
+train_patience:     5          # epochs without val-loss improvement before early stop (probes instead if is_best_eval_enabled)
 
 # Category head (hierarchical mode)
-category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token, based on notbooks/cat_rare_treshhold.py
-# This one doesn't really matter, SKu coverage numbers are tiny across the board, treshhold 50 only collapses 3.5% of SKUs
+category_rare_threshold: 5   # categories with <= this many SKUs are collapsed to RARE token
+# Sensitivity (notebooks/cat_rare_threshold.py): SKU coverage impact is tiny across the board; even threshold 50 collapses only 3.5% of SKUs.
 
 # Item head iteration:
 #   flat  - Iter 1 baseline: K-way softmax over full vocab, no category at all
@@ -58,7 +58,9 @@ svdpq_label_smoothing:  0.1       # per-dim CE label smoothing; caps per-token p
 # Must include the training timestamp suffix, e.g.
 #   session_transformer_d128_l4_h4_svdpq_t4v512_210426-15-58-18
 
-eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_280426-21-59-47_item_loss_freq_alpha_0.5
+#eval_model: session_transformer_d128_l4_h4_flat_070526-18-28-41_iter1_true
+#eval_model: session_transformer_d128_l4_h4_hier_t4v512_280426-09-01-02_testing-baseline-200k
+eval_model: session_transformer_d128_l4_h4_svdpq_t4v512_210526-12-12-18_iter3_svdpq_base_200k
 
 # Inference sampling temperatures
 infer_temperature:      1.0        # action / category / temporal heads

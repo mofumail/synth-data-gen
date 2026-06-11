@@ -115,16 +115,19 @@ def _read_train_events() -> pl.DataFrame:
     )
 
 
-def _build_train_user_inputs(n_users: int, seed: int) -> list[tuple]:
+def _build_anchor_table() -> tuple[pd.DataFrame, pd.DataFrame, pl.DataFrame]:
     """
-    Build one basket input per unique real training user.
+    Anchor selection shared by basket generation and the real-continuation
+    reference (generate_reference_baskets.py): one anchor per eligible user,
+    being their latest train session that contains an in-vocab item-bearing
+    event and is preceded by at least one earlier session.
 
-    For each selected user, anchor on their latest train session that contains an
-    in-vocab item-bearing event. The seed SKU is the first such item in that
-    anchor session, cross-session history is all earlier sessions, truncated to
-    HISTORY_WINDOW after adding EOS separators.
+    Returns (anchors, session_meta, train_events): anchors has one row per
+    eligible user (client_id, session_id, seed_sku, session_start,
+    session_pos); selection from it must use
+    anchors.sample(n=n_users, random_state=seed) so that the same seed picks
+    the same users everywhere.
     """
-    print("  Building unique real-user basket inputs from train history ...")
     sku2idx = get_sku2idx()
     vocab_skus = list(sku2idx.keys())
     df = _read_train_events()
@@ -162,6 +165,20 @@ def _build_train_user_inputs(n_users: int, seed: int) -> list[tuple]:
         .groupby("client_id", sort=False)
         .tail(1)
     )
+    return anchors, session_meta, df
+
+
+def _build_train_user_inputs(n_users: int, seed: int) -> list[tuple]:
+    """
+    Build one basket input per unique real training user.
+
+    For each selected user, anchor on their latest train session that contains an
+    in-vocab item-bearing event. The seed SKU is the first such item in that
+    anchor session, cross-session history is all earlier sessions, truncated to
+    HISTORY_WINDOW after adding EOS separators.
+    """
+    print("  Building unique real-user basket inputs from train history ...")
+    anchors, session_meta, df = _build_anchor_table()
     if len(anchors) < n_users:
         raise ValueError(
             f"requested {n_users:,} unique users with train history, but only "
