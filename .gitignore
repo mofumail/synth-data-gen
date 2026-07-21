@@ -122,10 +122,10 @@ dmypy.json
 .pyre/
 
 # Raw dataset (large parquet files, not committed)
-code/DATA/
+DATA/
 
 # Pipeline outputs (models, reports, synthetic data)
-code/pipeline/output/
+pipeline/output/
 
 # Synerise
-code/recsys2025/
+recsys2025/
