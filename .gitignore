@@ -122,15 +122,15 @@ dmypy.json
 .pyre/
 
 # Raw dataset (large parquet files, not committed)
-code/DATA/
+DATA/
 
 # Pipeline outputs (models, reports, synthetic data)
-code/pipeline/output/
+pipeline/output/
 
 # Synerise
-code/recsys2025/
+recsys2025/
 
 # Local-only arrival simulation files
-code/pipeline/simulation/arrival/mmpp.py
-code/pipeline/simulation/arrival/tod.py
-code/notebooks/name_embedding_analysis.ipynb
+pipeline/simulation/arrival/mmpp.py
+pipeline/simulation/arrival/tod.py
+notebooks/name_embedding_analysis.ipynb

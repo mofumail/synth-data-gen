@@ -1,1 +1,0 @@
--- BeauMinMaaiV5.pdf = Final version
